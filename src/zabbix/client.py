@@ -1,0 +1,252 @@
+import os
+import requests
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+def normalize_zabbix_url(url):
+    """
+    Permite usar estas dos formas en el .env:
+
+    ZABBIX_URL=http://10.57.1.213/zabbix
+    o
+    ZABBIX_URL=http://10.57.1.213/zabbix/api_jsonrpc.php
+    """
+    if not url:
+        raise ValueError("La variable ZABBIX_URL no está definida en el archivo .env")
+
+    url = url.rstrip("/")
+
+    if url.endswith("api_jsonrpc.php"):
+        return url
+
+    return f"{url}/api_jsonrpc.php"
+
+
+ZABBIX_URL = normalize_zabbix_url(os.getenv("ZABBIX_URL"))
+ZABBIX_TOKEN = os.getenv("ZABBIX_TOKEN")
+
+if not ZABBIX_TOKEN:
+    raise ValueError("La variable ZABBIX_TOKEN no está definida en el archivo .env")
+
+
+def zabbix_request(method, params=None):
+    """
+    Función base para hablar con la API de Zabbix.
+    Todas las demás funciones usan esta función.
+    """
+    if params is None:
+        params = {}
+
+    payload = {
+        "jsonrpc": "2.0",
+        "method": method,
+        "params": params,
+        "auth": ZABBIX_TOKEN,
+        "id": 1
+    }
+
+    headers = {
+        "Content-Type": "application/json-rpc"
+    }
+
+    response = requests.post(
+        ZABBIX_URL,
+        json=payload,
+        headers=headers,
+        timeout=30
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    if "error" in data:
+        error = data["error"]
+        message = error.get("message", "Error desconocido")
+        details = error.get("data", "")
+        raise Exception(f"Error de Zabbix API: {message} - {details}")
+
+    return data["result"]
+
+
+def get_hosts(limit=50):
+    """
+    Obtiene una lista limitada de hosts.
+    Evitamos traer demasiados hosts de golpe.
+    """
+    params = {
+        "output": ["hostid", "host", "name", "status"],
+        "sortfield": "name",
+        "limit": limit
+    }
+
+    return zabbix_request("host.get", params)
+
+
+def search_hosts(search_text):
+    """
+    Busca hosts por nombre técnico o nombre visible.
+    """
+    params = {
+        "output": ["hostid", "host", "name", "status"],
+        "search": {
+            "host": search_text,
+            "name": search_text
+        },
+        "searchByAny": True,
+        "sortfield": "name",
+        "limit": 50
+    }
+
+    return zabbix_request("host.get", params)
+
+
+def get_host_details(hostid):
+    """
+    Obtiene información más completa de un host específico.
+    """
+    params = {
+        "output": ["hostid", "host", "name", "status"],
+        "hostids": hostid,
+        "selectInterfaces": [
+            "interfaceid",
+            "type",
+            "ip",
+            "dns",
+            "port",
+            "main",
+            "useip"
+        ],
+        "selectGroups": ["groupid", "name"],
+        "selectParentTemplates": ["templateid", "name"],
+        "selectTags": ["tag", "value"],
+        "selectInventory": "extend"
+    }
+
+    result = zabbix_request("host.get", params)
+
+    if not result:
+        return None
+
+    return result[0]
+
+
+def get_host_items(hostid, search_text=None, limit=100):
+    """
+    Obtiene ítems de un host.
+    Se usa para revisar ítems específicos, no para diagnóstico masivo.
+    """
+    params = {
+        "output": [
+            "itemid",
+            "name",
+            "key_",
+            "type",
+            "value_type",
+            "status",
+            "state",
+            "lastvalue",
+            "lastclock",
+            "units"
+        ],
+        "hostids": hostid,
+        "sortfield": "name",
+        "limit": limit
+    }
+
+    if search_text:
+        params["search"] = {
+            "name": search_text,
+            "key_": search_text
+        }
+        params["searchByAny"] = True
+
+    return zabbix_request("item.get", params)
+
+
+def get_host_item_summary(hostid):
+    """
+    Devuelve un resumen de ítems por host:
+    total, enabled, disabled, unsupported, sin datos y última fecha de dato.
+    """
+    params = {
+        "output": [
+            "itemid",
+            "name",
+            "key_",
+            "status",
+            "state",
+            "lastclock"
+        ],
+        "hostids": hostid
+    }
+
+    items = zabbix_request("item.get", params)
+
+    summary = {
+        "total": len(items),
+        "enabled": 0,
+        "disabled": 0,
+        "unsupported": 0,
+        "without_data": 0,
+        "latest_clock": 0,
+        "unsupported_items": []
+    }
+
+    for item in items:
+        status = str(item.get("status"))
+        state = str(item.get("state"))
+        lastclock_raw = item.get("lastclock") or "0"
+
+        try:
+            lastclock = int(lastclock_raw)
+        except ValueError:
+            lastclock = 0
+
+        if status == "0":
+            summary["enabled"] += 1
+        elif status == "1":
+            summary["disabled"] += 1
+
+        if state == "1":
+            summary["unsupported"] += 1
+            summary["unsupported_items"].append({
+                "itemid": item.get("itemid"),
+                "name": item.get("name"),
+                "key": item.get("key_")
+            })
+
+        if lastclock == 0:
+            summary["without_data"] += 1
+
+        if lastclock > summary["latest_clock"]:
+            summary["latest_clock"] = lastclock
+
+    return summary
+
+
+def get_host_problems(hostid, limit=20):
+    """
+    Obtiene problemas activos asociados a un host.
+
+    En tu Zabbix, problem.get no aceptó ordenar por clock.
+    Por eso usamos eventid, que sí es aceptado por la API.
+    """
+    params = {
+        "output": [
+            "eventid",
+            "objectid",
+            "name",
+            "severity",
+            "clock",
+            "acknowledged"
+        ],
+        "hostids": hostid,
+        "sortfield": "eventid",
+        "sortorder": "DESC",
+        "limit": limit
+    }
+
+    return zabbix_request("problem.get", params)
