@@ -1,5 +1,6 @@
 from datetime import datetime
 from pathlib import Path
+from difflib import SequenceMatcher
 
 from config import settings
 
@@ -11,8 +12,8 @@ from zabbix.client import (
     get_host_item_summary,
     get_host_problems,
     get_host_groups,
-    search_host_groups,
-    get_hosts_by_groupid
+    get_hosts_by_groupid,
+    get_hosts_with_interfaces
 )
 
 
@@ -20,17 +21,10 @@ BACK_COMMANDS = ["b", "back", "atras", "atrás"]
 
 
 def is_back_command(value):
-    """
-    Verifica si el usuario quiere volver al menú principal.
-    """
     return value.strip().lower() in BACK_COMMANDS
 
 
 def ask_input(prompt):
-    """
-    Pide datos al usuario.
-    Si el usuario escribe b, back, atras o atrás, vuelve al menú principal.
-    """
     value = input(prompt).strip()
 
     if is_back_command(value):
@@ -39,12 +33,22 @@ def ask_input(prompt):
     return value
 
 
+def normalize_text(value):
+    if value is None:
+        return ""
+
+    return str(value).strip().lower()
+
+
+def similarity_score(text_a, text_b):
+    return SequenceMatcher(
+        None,
+        normalize_text(text_a),
+        normalize_text(text_b)
+    ).ratio()
+
+
 def format_status(status):
-    """
-    En Zabbix:
-    0 = Enabled
-    1 = Disabled
-    """
     if str(status) == "0":
         return "Enabled"
     elif str(status) == "1":
@@ -53,11 +57,6 @@ def format_status(status):
 
 
 def format_item_state(state):
-    """
-    En Zabbix:
-    0 = Normal
-    1 = Unsupported
-    """
     if str(state) == "0":
         return "Normal"
     elif str(state) == "1":
@@ -66,15 +65,6 @@ def format_item_state(state):
 
 
 def format_problem_severity(severity):
-    """
-    Severidades de Zabbix:
-    0 = Not classified
-    1 = Information
-    2 = Warning
-    3 = Average
-    4 = High
-    5 = Disaster
-    """
     mapping = {
         "0": "Not classified",
         "1": "Information",
@@ -88,9 +78,6 @@ def format_problem_severity(severity):
 
 
 def format_lastclock(lastclock):
-    """
-    Convierte el timestamp de Zabbix a una fecha legible.
-    """
     if not lastclock or str(lastclock) == "0":
         return "No data"
 
@@ -98,6 +85,70 @@ def format_lastclock(lastclock):
         return datetime.fromtimestamp(int(lastclock)).strftime("%Y-%m-%d %H:%M:%S")
     except Exception:
         return "Invalid date"
+
+
+def format_interface_type(interface_type):
+    mapping = {
+        "1": "Agent",
+        "2": "SNMP",
+        "3": "IPMI",
+        "4": "JMX"
+    }
+
+    return mapping.get(str(interface_type), "Unknown")
+
+
+def get_primary_interface(host):
+    """
+    Devuelve la interfaz principal del host.
+    Si no hay una marcada como main=1, devuelve la primera.
+    """
+    interfaces = host.get("interfaces", [])
+
+    if not interfaces:
+        return None
+
+    for interface in interfaces:
+        if str(interface.get("main")) == "1":
+            return interface
+
+    return interfaces[0]
+
+
+def get_host_ip(host):
+    interface = get_primary_interface(host)
+
+    if not interface:
+        return ""
+
+    return interface.get("ip") or ""
+
+
+def get_host_dns(host):
+    interface = get_primary_interface(host)
+
+    if not interface:
+        return ""
+
+    return interface.get("dns") or ""
+
+
+def get_host_interface_type(host):
+    interface = get_primary_interface(host)
+
+    if not interface:
+        return ""
+
+    return format_interface_type(interface.get("type"))
+
+
+def get_host_groups_text(host):
+    groups = host.get("groups", [])
+
+    if not groups:
+        return ""
+
+    return ", ".join(group.get("name", "") for group in groups)
 
 
 def print_hosts(hosts):
@@ -111,14 +162,17 @@ def print_hosts(hosts):
         hostid = host.get("hostid", "")
         name = host.get("name") or host.get("host", "")
         status = format_status(host.get("status"))
+        ip = get_host_ip(host)
+        dns = get_host_dns(host)
+        interface_type = get_host_interface_type(host)
 
-        print(f"{hostid} | {name} | {status}")
+        print(
+            f"{hostid} | {name} | IP: {ip or '-'} | "
+            f"DNS: {dns or '-'} | Interface: {interface_type or '-'} | {status}"
+        )
 
 
 def print_host_groups(groups):
-    """
-    Imprime grupos de hosts encontrados.
-    """
     if not groups:
         print("\nNo host groups found.")
         return
@@ -126,7 +180,34 @@ def print_host_groups(groups):
     print(f"\nTotal host groups shown: {len(groups)}\n")
 
     for group in groups:
-        print(f"{group.get('groupid')} | {group.get('name')}")
+        hosts_visible = len(group.get("hosts", []))
+        print(f"{group.get('groupid')} | {group.get('name')} | Hosts visible: {hosts_visible}")
+
+
+def find_host_groups_by_text(search_text, groups, max_results=20):
+    """
+    Busca grupos por coincidencia parcial real.
+    No usa similitud agresiva para evitar falsos positivos.
+    """
+    search_normalized = normalize_text(search_text)
+    results = []
+
+    for group in groups:
+        group_name = group.get("name", "")
+        group_normalized = normalize_text(group_name)
+
+        if search_normalized in group_normalized:
+            results.append(group)
+
+    return results[:max_results]
+
+
+def smart_search_host_groups(search_text):
+    """
+    Busca host groups localmente sobre los grupos visibles.
+    """
+    all_groups = get_host_groups(limit=1000)
+    return find_host_groups_by_text(search_text, all_groups)
 
 
 def print_host_details(host):
@@ -142,19 +223,11 @@ def print_host_details(host):
     print(f"Visible name: {host.get('name')}")
     print(f"Status: {format_status(host.get('status'))}")
 
-    print("\nGroups:")
-    groups = host.get("groups", [])
-    if groups:
-        for group in groups:
-            print(f"- {group.get('name')}")
-    else:
-        print("- No groups found")
-
     print("\nInterfaces:")
     interfaces = host.get("interfaces", [])
     if interfaces:
         for interface in interfaces:
-            interface_type = interface.get("type")
+            interface_type = format_interface_type(interface.get("type"))
             ip = interface.get("ip")
             dns = interface.get("dns")
             port = interface.get("port")
@@ -162,13 +235,21 @@ def print_host_details(host):
 
             print(
                 f"- Type: {interface_type} | "
-                f"IP: {ip} | "
-                f"DNS: {dns} | "
-                f"Port: {port} | "
+                f"IP: {ip or '-'} | "
+                f"DNS: {dns or '-'} | "
+                f"Port: {port or '-'} | "
                 f"Main: {main}"
             )
     else:
         print("- No interfaces found")
+
+    print("\nGroups:")
+    groups = host.get("groups", [])
+    if groups:
+        for group in groups:
+            print(f"- {group.get('name')}")
+    else:
+        print("- No groups found")
 
     print("\nTemplates:")
     templates = host.get("parentTemplates", [])
@@ -215,6 +296,132 @@ def print_host_details(host):
         print("- No inventory found")
 
 
+def smart_search_hosts(search_text):
+    """
+    Busca hosts visibles por:
+    - hostid
+    - technical host name
+    - visible name
+    - IP
+    - DNS
+    - grupo
+
+    La búsqueda es local para poder encontrar IPs parciales como 10.57 o 192.168.
+    """
+    search_normalized = normalize_text(search_text)
+    hosts = get_hosts_with_interfaces(limit=1000)
+    results = []
+
+    for host in hosts:
+        hostid = normalize_text(host.get("hostid"))
+        technical_name = normalize_text(host.get("host"))
+        visible_name = normalize_text(host.get("name"))
+        groups_text = normalize_text(get_host_groups_text(host))
+
+        interfaces = host.get("interfaces", [])
+
+        fields_to_match = [
+            hostid,
+            technical_name,
+            visible_name,
+            groups_text
+        ]
+
+        for interface in interfaces:
+            fields_to_match.append(normalize_text(interface.get("ip")))
+            fields_to_match.append(normalize_text(interface.get("dns")))
+
+        matched = False
+
+        for field in fields_to_match:
+            if search_normalized and search_normalized in field:
+                matched = True
+                break
+
+        if matched:
+            results.append(host)
+
+    return results
+
+
+def print_smart_host_results(hosts):
+    if not hosts:
+        print("\nNo hosts found.")
+        return
+
+    print(f"\nTotal hosts found: {len(hosts)}\n")
+
+    for host in hosts:
+        hostid = host.get("hostid")
+        name = host.get("name") or host.get("host")
+        technical_name = host.get("host")
+        status = format_status(host.get("status"))
+        ip = get_host_ip(host)
+        dns = get_host_dns(host)
+        interface_type = get_host_interface_type(host)
+        groups = get_host_groups_text(host)
+
+        print(
+            f"{hostid} | {name} | Technical: {technical_name} | "
+            f"IP: {ip or '-'} | DNS: {dns or '-'} | "
+            f"Interface: {interface_type or '-'} | Groups: {groups or '-'} | {status}"
+        )
+
+
+def search_host_and_select_hostid():
+    """
+    Flujo interactivo:
+    1. Busca host por nombre/IP/DNS/grupo/hostid.
+    2. Muestra resultados.
+    3. Si solo hay un resultado, usa ese hostid automáticamente.
+    4. Si hay varios resultados, permite seleccionar un hostid.
+    """
+    search_text = ask_input(
+        "\nType host name, IP, DNS, group, hostid or part of it, or 'b' to go back: "
+    )
+
+    if search_text is None:
+        return None
+
+    if not search_text:
+        print("\nSearch text cannot be empty.")
+        return None
+
+    hosts = smart_search_hosts(search_text)
+
+    if not hosts:
+        print("\nNo hosts found.")
+        return None
+
+    print_smart_host_results(hosts)
+
+    if len(hosts) == 1:
+        hostid = hosts[0].get("hostid")
+        name = hosts[0].get("name") or hosts[0].get("host")
+        print(f"\nOnly one host found. Using hostid: {hostid} | {name}")
+        return hostid
+
+    hostid = ask_input(
+        "\nType the hostid to continue, or 'b' to go back: "
+    )
+
+    if hostid is None:
+        return None
+
+    if not hostid:
+        print("\nHost ID cannot be empty.")
+        return None
+
+    valid_hostids = [str(host.get("hostid")) for host in hosts]
+
+    if str(hostid) not in valid_hostids:
+        print("\nThe hostid you typed was not in the search results.")
+        print("Run the search again and choose one of the displayed host IDs.")
+        return None
+
+    return hostid
+
+
 def print_host_items(items):
     if not items:
         print("\nNo items found.")
@@ -248,15 +455,6 @@ def print_host_items(items):
 
 
 def build_host_assessment(host, item_summary, problems):
-    """
-    Genera una evaluación simple del host.
-
-    El enfoque es:
-    - Hallazgos.
-    - Puntos de revisión.
-    - Validaciones técnicas para administrador Zabbix.
-    - Seguimiento de gestión.
-    """
     findings = []
     review_points = []
     admin_checks = []
@@ -387,9 +585,6 @@ def build_host_assessment(host, item_summary, problems):
 
 
 def build_host_diagnostic_data(hostid):
-    """
-    Construye los datos del diagnóstico de un host para usarlos en pantalla o reporte.
-    """
     host = get_host_details(hostid)
 
     if not host:
@@ -505,9 +700,6 @@ def print_host_diagnostic_report(hostid):
 
 
 def render_host_diagnostic_markdown(diagnostic_data):
-    """
-    Convierte el diagnóstico de un host en Markdown.
-    """
     host = diagnostic_data["host"]
     item_summary = diagnostic_data["item_summary"]
     problems = diagnostic_data["problems"]
@@ -624,9 +816,6 @@ def render_host_diagnostic_markdown(diagnostic_data):
 
 
 def save_host_diagnostic_report(hostid):
-    """
-    Genera y guarda un reporte Markdown del diagnóstico de un host.
-    """
     diagnostic_data = build_host_diagnostic_data(hostid)
 
     if not diagnostic_data:
@@ -658,12 +847,6 @@ def save_host_diagnostic_report(hostid):
 
 
 def build_host_group_health_summary(groupid, limit=None):
-    """
-    Construye un resumen de salud de un grupo de hosts.
-
-    Nota:
-    Se limita la cantidad de hosts analizados para evitar cargas grandes al inicio.
-    """
     if limit is None:
         limit = settings.group_host_analysis_limit
 
@@ -689,9 +872,24 @@ def build_host_group_health_summary(groupid, limit=None):
 
     host_results = []
 
+    if not hosts:
+        summary["priority"] = "Not analyzed"
+        summary["review_points"].append("No hosts were found in this group.")
+        summary["review_points"].append(
+            "Possible causes: the group is empty, the selected group is not the intended one, or the API user has no permission to view hosts in this group."
+        )
+        summary["admin_checks"].append(
+            "Validate the group ID, search the group again using option 7, and confirm API permissions for this host group."
+        )
+        summary["management_follow_up"].append(
+            "No management conclusion should be generated because no hosts were analyzed."
+        )
+        return summary, host_results
+
     for host in hosts:
         hostid = host.get("hostid")
         host_name = host.get("name") or host.get("host")
+        ip = get_host_ip(host)
 
         if str(host.get("status")) == "0":
             summary["enabled_hosts"] += 1
@@ -723,6 +921,7 @@ def build_host_group_health_summary(groupid, limit=None):
         host_results.append({
             "hostid": hostid,
             "name": host_name,
+            "ip": ip,
             "status": format_status(host.get("status")),
             "active_problems": len(problems),
             "high_or_disaster": len(high_or_disaster),
@@ -784,9 +983,6 @@ def build_host_group_health_summary(groupid, limit=None):
 
 
 def print_host_group_health_summary(groupid):
-    """
-    Imprime resumen de salud de un grupo.
-    """
     summary, host_results = build_host_group_health_summary(groupid)
 
     print("\nHost Group Health Summary")
@@ -825,6 +1021,12 @@ def print_host_group_health_summary(groupid):
     for follow_up in summary["management_follow_up"]:
         print(f"- {follow_up}")
 
+    if not host_results:
+        print("\nTop hosts requiring review")
+        print("-" * 70)
+        print("- No hosts were analyzed.")
+        return
+
     print("\nTop hosts requiring review")
     print("-" * 70)
 
@@ -841,7 +1043,7 @@ def print_host_group_health_summary(groupid):
 
     for host in relevant_hosts[:20]:
         print(
-            f"- {host['hostid']} | {host['name']} | "
+            f"- {host['hostid']} | {host['name']} | IP: {host['ip'] or '-'} | "
             f"Problems: {host['active_problems']} | "
             f"High/Disaster: {host['high_or_disaster']} | "
             f"Unsupported: {host['unsupported_items']} | "
@@ -861,6 +1063,9 @@ def main():
         print("6. Save host diagnostic report to Markdown")
         print("7. Search host groups")
         print("8. Show host group health summary")
+        print("9. Smart search hosts by name, IP, DNS, group or hostid")
+        print("10. Search host and run diagnostic")
+        print("11. Search host and save diagnostic Markdown")
         print("0. Exit")
         print("\nTip: inside any option, type 'b' to go back to the main menu.")
 
@@ -958,8 +1163,14 @@ def main():
                     print("\nSearch text cannot be empty.")
                     continue
 
-                groups = search_host_groups(search_text)
-                print_host_groups(groups)
+                groups = smart_search_host_groups(search_text)
+
+                if groups:
+                    print_host_groups(groups)
+                else:
+                    print(f"\nNo host groups found for: {search_text}")
+                    print("No similar visible groups were found for this API user.")
+                    print("Try another word, or validate whether the API user can see the expected host groups.")
 
             elif option == "8":
                 groupid = ask_input("\nType host groupid, or 'b' to go back: ")
@@ -972,6 +1183,37 @@ def main():
                     continue
 
                 print_host_group_health_summary(groupid)
+
+            elif option == "9":
+                search_text = ask_input(
+                    "\nType host name, IP, DNS, group, hostid or part of it, or 'b' to go back: "
+                )
+
+                if search_text is None:
+                    continue
+
+                if not search_text:
+                    print("\nSearch text cannot be empty.")
+                    continue
+
+                hosts = smart_search_hosts(search_text)
+                print_smart_host_results(hosts)
+
+            elif option == "10":
+                hostid = search_host_and_select_hostid()
+
+                if hostid is None:
+                    continue
+
+                print_host_diagnostic_report(hostid)
+
+            elif option == "11":
+                hostid = search_host_and_select_hostid()
+
+                if hostid is None:
+                    continue
+
+                save_host_diagnostic_report(hostid)
 
             elif option == "0":
                 print("\nExiting...")

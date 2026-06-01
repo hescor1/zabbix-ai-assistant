@@ -46,13 +46,23 @@ def zabbix_request(method, params=None):
 def get_hosts(limit=None):
     """
     Obtiene una lista limitada de hosts.
-    Evitamos traer demasiados hosts de golpe.
+    Incluye interfaces y grupos para mostrar IP y contexto.
     """
     if limit is None:
         limit = settings.host_search_limit
 
     params = {
         "output": ["hostid", "host", "name", "status"],
+        "selectInterfaces": [
+            "interfaceid",
+            "type",
+            "ip",
+            "dns",
+            "port",
+            "main",
+            "useip"
+        ],
+        "selectGroups": ["groupid", "name"],
         "sortfield": "name",
         "limit": limit
     }
@@ -63,17 +73,55 @@ def get_hosts(limit=None):
 def search_hosts(search_text, limit=None):
     """
     Busca hosts por nombre técnico o nombre visible.
+    Incluye interfaces y grupos para mostrar IP y contexto.
     """
     if limit is None:
         limit = settings.host_search_limit
 
     params = {
         "output": ["hostid", "host", "name", "status"],
+        "selectInterfaces": [
+            "interfaceid",
+            "type",
+            "ip",
+            "dns",
+            "port",
+            "main",
+            "useip"
+        ],
+        "selectGroups": ["groupid", "name"],
         "search": {
             "host": search_text,
             "name": search_text
         },
         "searchByAny": True,
+        "sortfield": "name",
+        "limit": limit
+    }
+
+    return zabbix_request("host.get", params)
+
+
+def get_hosts_with_interfaces(limit=None):
+    """
+    Obtiene hosts visibles con interfaces y grupos.
+    Se usa para búsquedas inteligentes por IP, DNS, hostid o nombre.
+    """
+    if limit is None:
+        limit = 1000
+
+    params = {
+        "output": ["hostid", "host", "name", "status"],
+        "selectInterfaces": [
+            "interfaceid",
+            "type",
+            "ip",
+            "dns",
+            "port",
+            "main",
+            "useip"
+        ],
+        "selectGroups": ["groupid", "name"],
         "sortfield": "name",
         "limit": limit
     }
@@ -208,9 +256,6 @@ def get_host_item_summary(hostid):
 def get_host_problems(hostid, limit=20):
     """
     Obtiene problemas activos asociados a un host.
-
-    En tu Zabbix, problem.get no aceptó ordenar por clock.
-    Por eso usamos eventid, que sí es aceptado por la API.
     """
     params = {
         "output": [
@@ -233,7 +278,6 @@ def get_host_problems(hostid, limit=20):
 def get_active_problems(limit=None):
     """
     Obtiene problemas activos generales de Zabbix.
-    Este será el insumo inicial para reportes diarios.
     """
     if limit is None:
         limit = settings.default_problem_limit
@@ -258,12 +302,14 @@ def get_active_problems(limit=None):
 def get_host_groups(limit=None):
     """
     Obtiene grupos de hosts de Zabbix.
+    Incluye hosts visibles para poder contar cuántos hosts ve el token/API user.
     """
     if limit is None:
         limit = settings.host_search_limit
 
     params = {
         "output": ["groupid", "name"],
+        "selectHosts": ["hostid"],
         "sortfield": "name",
         "limit": limit
     }
@@ -274,12 +320,14 @@ def get_host_groups(limit=None):
 def search_host_groups(search_text, limit=None):
     """
     Busca grupos de hosts por nombre.
+    Incluye hosts visibles para mostrar un conteo antes de analizarlos.
     """
     if limit is None:
         limit = settings.host_search_limit
 
     params = {
         "output": ["groupid", "name"],
+        "selectHosts": ["hostid"],
         "search": {
             "name": search_text
         },
@@ -293,13 +341,23 @@ def search_host_groups(search_text, limit=None):
 def get_hosts_by_groupid(groupid, limit=None):
     """
     Obtiene hosts de un grupo específico.
-    Se usa con límite para evitar consultas muy grandes al inicio.
+    Incluye interfaces para mostrar IP en los resúmenes de grupo.
     """
     if limit is None:
         limit = settings.group_host_analysis_limit
 
     params = {
         "output": ["hostid", "host", "name", "status"],
+        "selectInterfaces": [
+            "interfaceid",
+            "type",
+            "ip",
+            "dns",
+            "port",
+            "main",
+            "useip"
+        ],
+        "selectGroups": ["groupid", "name"],
         "groupids": groupid,
         "sortfield": "name",
         "limit": limit
