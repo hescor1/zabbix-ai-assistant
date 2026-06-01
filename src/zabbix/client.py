@@ -1,34 +1,6 @@
-import os
 import requests
-from dotenv import load_dotenv
 
-load_dotenv()
-
-
-def normalize_zabbix_url(url):
-    """
-    Permite usar estas dos formas en el .env:
-
-    ZABBIX_URL=http://10.57.1.213/zabbix
-    o
-    ZABBIX_URL=http://10.57.1.213/zabbix/api_jsonrpc.php
-    """
-    if not url:
-        raise ValueError("La variable ZABBIX_URL no está definida en el archivo .env")
-
-    url = url.rstrip("/")
-
-    if url.endswith("api_jsonrpc.php"):
-        return url
-
-    return f"{url}/api_jsonrpc.php"
-
-
-ZABBIX_URL = normalize_zabbix_url(os.getenv("ZABBIX_URL"))
-ZABBIX_TOKEN = os.getenv("ZABBIX_TOKEN")
-
-if not ZABBIX_TOKEN:
-    raise ValueError("La variable ZABBIX_TOKEN no está definida en el archivo .env")
+from config import settings
 
 
 def zabbix_request(method, params=None):
@@ -43,7 +15,7 @@ def zabbix_request(method, params=None):
         "jsonrpc": "2.0",
         "method": method,
         "params": params,
-        "auth": ZABBIX_TOKEN,
+        "auth": settings.zabbix_token,
         "id": 1
     }
 
@@ -52,10 +24,10 @@ def zabbix_request(method, params=None):
     }
 
     response = requests.post(
-        ZABBIX_URL,
+        settings.zabbix_api_url,
         json=payload,
         headers=headers,
-        timeout=30
+        timeout=settings.request_timeout_seconds
     )
 
     response.raise_for_status()
@@ -71,11 +43,14 @@ def zabbix_request(method, params=None):
     return data["result"]
 
 
-def get_hosts(limit=50):
+def get_hosts(limit=None):
     """
     Obtiene una lista limitada de hosts.
     Evitamos traer demasiados hosts de golpe.
     """
+    if limit is None:
+        limit = settings.host_search_limit
+
     params = {
         "output": ["hostid", "host", "name", "status"],
         "sortfield": "name",
@@ -85,10 +60,13 @@ def get_hosts(limit=50):
     return zabbix_request("host.get", params)
 
 
-def search_hosts(search_text):
+def search_hosts(search_text, limit=None):
     """
     Busca hosts por nombre técnico o nombre visible.
     """
+    if limit is None:
+        limit = settings.host_search_limit
+
     params = {
         "output": ["hostid", "host", "name", "status"],
         "search": {
@@ -97,7 +75,7 @@ def search_hosts(search_text):
         },
         "searchByAny": True,
         "sortfield": "name",
-        "limit": 50
+        "limit": limit
     }
 
     return zabbix_request("host.get", params)
@@ -250,3 +228,81 @@ def get_host_problems(hostid, limit=20):
     }
 
     return zabbix_request("problem.get", params)
+
+
+def get_active_problems(limit=None):
+    """
+    Obtiene problemas activos generales de Zabbix.
+    Este será el insumo inicial para reportes diarios.
+    """
+    if limit is None:
+        limit = settings.default_problem_limit
+
+    params = {
+        "output": [
+            "eventid",
+            "objectid",
+            "name",
+            "severity",
+            "clock",
+            "acknowledged"
+        ],
+        "sortfield": "eventid",
+        "sortorder": "DESC",
+        "limit": limit
+    }
+
+    return zabbix_request("problem.get", params)
+
+
+def get_host_groups(limit=None):
+    """
+    Obtiene grupos de hosts de Zabbix.
+    """
+    if limit is None:
+        limit = settings.host_search_limit
+
+    params = {
+        "output": ["groupid", "name"],
+        "sortfield": "name",
+        "limit": limit
+    }
+
+    return zabbix_request("hostgroup.get", params)
+
+
+def search_host_groups(search_text, limit=None):
+    """
+    Busca grupos de hosts por nombre.
+    """
+    if limit is None:
+        limit = settings.host_search_limit
+
+    params = {
+        "output": ["groupid", "name"],
+        "search": {
+            "name": search_text
+        },
+        "sortfield": "name",
+        "limit": limit
+    }
+
+    return zabbix_request("hostgroup.get", params)
+
+
+def get_hosts_by_groupid(groupid, limit=None):
+    """
+    Obtiene hosts de un grupo específico.
+    Se usa con límite para evitar consultas muy grandes al inicio.
+    """
+    if limit is None:
+        limit = settings.group_host_analysis_limit
+
+    params = {
+        "output": ["hostid", "host", "name", "status"],
+        "groupids": groupid,
+        "sortfield": "name",
+        "limit": limit
+    }
+
+    return zabbix_request("host.get", params)

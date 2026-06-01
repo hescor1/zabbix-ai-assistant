@@ -1,13 +1,18 @@
 from datetime import datetime
 from pathlib import Path
 
+from config import settings
+
 from zabbix.client import (
     get_hosts,
     search_hosts,
     get_host_details,
     get_host_items,
     get_host_item_summary,
-    get_host_problems
+    get_host_problems,
+    get_host_groups,
+    search_host_groups,
+    get_hosts_by_groupid
 )
 
 
@@ -108,6 +113,20 @@ def print_hosts(hosts):
         status = format_status(host.get("status"))
 
         print(f"{hostid} | {name} | {status}")
+
+
+def print_host_groups(groups):
+    """
+    Imprime grupos de hosts encontrados.
+    """
+    if not groups:
+        print("\nNo host groups found.")
+        return
+
+    print(f"\nTotal host groups shown: {len(groups)}\n")
+
+    for group in groups:
+        print(f"{group.get('groupid')} | {group.get('name')}")
 
 
 def print_host_details(host):
@@ -231,10 +250,17 @@ def print_host_items(items):
 def build_host_assessment(host, item_summary, problems):
     """
     Genera una evaluación simple del host.
-    Esta es la primera capa de análisis accionable.
+
+    El enfoque es:
+    - Hallazgos.
+    - Puntos de revisión.
+    - Validaciones técnicas para administrador Zabbix.
+    - Seguimiento de gestión.
     """
     findings = []
-    actions = []
+    review_points = []
+    admin_checks = []
+    management_follow_up = []
     priority = "Low"
 
     host_status = str(host.get("status"))
@@ -249,80 +275,114 @@ def build_host_assessment(host, item_summary, problems):
 
     if host_status == "1":
         findings.append("The host is disabled in Zabbix.")
-        actions.append(
-            "Validate whether the host should remain disabled or be removed from operational monitoring."
+        review_points.append(
+            "Confirm whether this host should remain disabled or if it should be included in operational monitoring."
+        )
+        admin_checks.append(
+            "Review host status and validate if the disabled condition is intentional."
         )
         priority = "Low"
 
     if not interfaces:
         findings.append("The host has no configured interfaces.")
-        actions.append(
-            "Review the host configuration and add the required Agent, SNMP, JMX or IPMI interface."
+        review_points.append(
+            "The host may not be able to collect data because no monitoring interface is configured."
+        )
+        admin_checks.append(
+            "Review whether the host requires Agent, SNMP, JMX or IPMI interface."
         )
         priority = "High"
 
     if not templates:
         findings.append("The host has no templates assigned.")
-        actions.append(
-            "Assign the appropriate monitoring template according to the device or system type."
+        review_points.append(
+            "The host may have incomplete monitoring coverage because no template is assigned."
+        )
+        admin_checks.append(
+            "Review template assignment according to the device or system type."
         )
         priority = "High"
 
     if not tags:
         findings.append("The host has no tags configured.")
-        actions.append(
-            "Add business and operational tags such as system, owner, location and criticality."
+        review_points.append(
+            "The host lacks business or operational classification for reporting."
+        )
+        admin_checks.append(
+            "Review minimum tags such as system, owner, location and criticality."
         )
         if priority == "Low":
             priority = "Medium"
 
     if item_summary["total"] == 0:
         findings.append("The host has no monitoring items.")
-        actions.append("Review template assignment or item creation.")
+        review_points.append(
+            "The host may not be effectively monitored because no items were found."
+        )
+        admin_checks.append(
+            "Review template assignment, item creation or host configuration."
+        )
         priority = "High"
 
     if item_summary["unsupported"] > 0:
         findings.append(f"The host has {item_summary['unsupported']} unsupported items.")
-        actions.append(
-            "Review unsupported items, item keys, SNMP OIDs, macros, permissions or template compatibility."
+        review_points.append(
+            "Unsupported items can reduce monitoring quality and should be reviewed by the Zabbix administrator."
+        )
+        admin_checks.append(
+            "Review item keys, SNMP OIDs, macros, permissions, preprocessing or template compatibility."
         )
         if priority != "High":
             priority = "Medium"
 
     if item_summary["without_data"] > 0:
         findings.append(f"The host has {item_summary['without_data']} items without data.")
-        actions.append(
-            "Validate agent/SNMP availability, item configuration and whether the device is reachable."
+        review_points.append(
+            "Items without data may indicate partial loss of visibility."
+        )
+        admin_checks.append(
+            "Review item status, lastclock, agent/SNMP availability, proxy availability and update interval."
         )
         if priority != "High":
             priority = "Medium"
 
     if active_high_problems:
         findings.append(f"The host has {len(active_high_problems)} active High/Disaster problems.")
-        actions.append(
-            "Prioritize active High/Disaster problems and validate operational impact."
+        review_points.append(
+            "High or Disaster problems should be reviewed with priority by the responsible team."
+        )
+        management_follow_up.append(
+            "Confirm ownership and define follow-up with the responsible technical or process owner."
         )
         priority = "High"
 
     if problems and not active_high_problems:
         findings.append(f"The host has {len(problems)} active problems.")
-        actions.append(
-            "Review active problems and confirm whether they require operational action."
+        review_points.append(
+            "Active problems should be reviewed to determine if they represent real issues, accepted conditions or monitoring noise."
         )
         if priority == "Low":
             priority = "Medium"
 
     if not findings:
         assessment = "The host appears to be monitored correctly. No major monitoring gaps were detected."
-        actions.append("No immediate action required. Continue regular monitoring.")
+        review_points.append("No immediate review point detected for this host.")
+        admin_checks.append("Continue regular monitoring.")
     else:
         assessment = "The host has monitoring findings that should be reviewed."
+
+    if not management_follow_up:
+        management_follow_up.append(
+            "No management escalation is suggested from this host diagnostic unless the technical owner confirms operational impact."
+        )
 
     return {
         "priority": priority,
         "assessment": assessment,
         "findings": findings,
-        "actions": actions
+        "review_points": review_points,
+        "admin_checks": admin_checks,
+        "management_follow_up": management_follow_up
     }
 
 
@@ -402,11 +462,23 @@ def print_host_diagnostic_report(hostid):
     else:
         print("- No relevant findings detected.")
 
-    print("\nRecommended actions")
+    print("\nReview points")
     print("-" * 70)
 
-    for action in assessment["actions"]:
-        print(f"- {action}")
+    for point in assessment["review_points"]:
+        print(f"- {point}")
+
+    print("\nAdmin technical checks")
+    print("-" * 70)
+
+    for check in assessment["admin_checks"]:
+        print(f"- {check}")
+
+    print("\nManagement follow-up")
+    print("-" * 70)
+
+    for follow_up in assessment["management_follow_up"]:
+        print(f"- {follow_up}")
 
     if problems:
         print("\nActive problems")
@@ -451,6 +523,7 @@ def render_host_diagnostic_markdown(diagnostic_data):
     lines.append("# Host Diagnostic Report")
     lines.append("")
     lines.append(f"Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append(f"Environment: {settings.environment}")
     lines.append("")
     lines.append("## Host information")
     lines.append("")
@@ -491,12 +564,25 @@ def render_host_diagnostic_markdown(diagnostic_data):
         lines.append("- No relevant findings detected.")
 
     lines.append("")
-
-    lines.append("## Recommended actions")
+    lines.append("## Review points")
     lines.append("")
 
-    for action in assessment["actions"]:
-        lines.append(f"- {action}")
+    for point in assessment["review_points"]:
+        lines.append(f"- {point}")
+
+    lines.append("")
+    lines.append("## Admin technical checks")
+    lines.append("")
+
+    for check in assessment["admin_checks"]:
+        lines.append(f"- {check}")
+
+    lines.append("")
+    lines.append("## Management follow-up")
+    lines.append("")
+
+    for follow_up in assessment["management_follow_up"]:
+        lines.append(f"- {follow_up}")
 
     lines.append("")
 
@@ -528,8 +614,9 @@ def render_host_diagnostic_markdown(diagnostic_data):
     lines.append("## Management interpretation")
     lines.append("")
     lines.append(
-        "This report identifies monitoring gaps or active issues that may affect visibility, "
-        "incident response and operational decision-making."
+        "This report identifies monitoring findings that may affect visibility, "
+        "monitoring quality or operational follow-up. The final remediation path "
+        "should be defined by the responsible technical or process owner."
     )
     lines.append("")
 
@@ -556,7 +643,7 @@ def save_host_diagnostic_report(hostid):
         .replace(":", "_")
     )
 
-    reports_dir = Path("output") / "reports"
+    reports_dir = Path(settings.report_output_dir)
     reports_dir.mkdir(parents=True, exist_ok=True)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -570,6 +657,198 @@ def save_host_diagnostic_report(hostid):
     print(f"Path: {report_path}")
 
 
+def build_host_group_health_summary(groupid, limit=None):
+    """
+    Construye un resumen de salud de un grupo de hosts.
+
+    Nota:
+    Se limita la cantidad de hosts analizados para evitar cargas grandes al inicio.
+    """
+    if limit is None:
+        limit = settings.group_host_analysis_limit
+
+    hosts = get_hosts_by_groupid(groupid, limit=limit)
+
+    summary = {
+        "groupid": groupid,
+        "hosts_analyzed": len(hosts),
+        "analysis_limit": limit,
+        "enabled_hosts": 0,
+        "disabled_hosts": 0,
+        "hosts_with_active_problems": 0,
+        "hosts_with_high_or_disaster": 0,
+        "hosts_with_unsupported_items": 0,
+        "hosts_with_items_without_data": 0,
+        "total_unsupported_items": 0,
+        "total_items_without_data": 0,
+        "priority": "Low",
+        "review_points": [],
+        "admin_checks": [],
+        "management_follow_up": []
+    }
+
+    host_results = []
+
+    for host in hosts:
+        hostid = host.get("hostid")
+        host_name = host.get("name") or host.get("host")
+
+        if str(host.get("status")) == "0":
+            summary["enabled_hosts"] += 1
+        elif str(host.get("status")) == "1":
+            summary["disabled_hosts"] += 1
+
+        item_summary = get_host_item_summary(hostid)
+        problems = get_host_problems(hostid, limit=20)
+
+        high_or_disaster = [
+            problem for problem in problems
+            if str(problem.get("severity")) in ["4", "5"]
+        ]
+
+        if problems:
+            summary["hosts_with_active_problems"] += 1
+
+        if high_or_disaster:
+            summary["hosts_with_high_or_disaster"] += 1
+
+        if item_summary["unsupported"] > 0:
+            summary["hosts_with_unsupported_items"] += 1
+            summary["total_unsupported_items"] += item_summary["unsupported"]
+
+        if item_summary["without_data"] > 0:
+            summary["hosts_with_items_without_data"] += 1
+            summary["total_items_without_data"] += item_summary["without_data"]
+
+        host_results.append({
+            "hostid": hostid,
+            "name": host_name,
+            "status": format_status(host.get("status")),
+            "active_problems": len(problems),
+            "high_or_disaster": len(high_or_disaster),
+            "unsupported_items": item_summary["unsupported"],
+            "items_without_data": item_summary["without_data"]
+        })
+
+    if summary["hosts_with_high_or_disaster"] > 0:
+        summary["priority"] = "High"
+        summary["review_points"].append(
+            "The group has hosts with active High or Disaster problems."
+        )
+        summary["management_follow_up"].append(
+            "Confirm ownership and follow-up for hosts with High or Disaster problems."
+        )
+
+    if summary["hosts_with_active_problems"] > 0 and summary["priority"] != "High":
+        summary["priority"] = "Medium"
+        summary["review_points"].append(
+            "The group has hosts with active problems that should be reviewed."
+        )
+
+    if summary["hosts_with_unsupported_items"] > 0:
+        if summary["priority"] == "Low":
+            summary["priority"] = "Medium"
+        summary["review_points"].append(
+            "The group has unsupported items. This is relevant for monitoring quality."
+        )
+        summary["admin_checks"].append(
+            "Review unsupported items by host, template, key, OID, macro or preprocessing rule."
+        )
+
+    if summary["hosts_with_items_without_data"] > 0:
+        if summary["priority"] == "Low":
+            summary["priority"] = "Medium"
+        summary["review_points"].append(
+            "The group has items without data. This may indicate partial visibility gaps."
+        )
+        summary["admin_checks"].append(
+            "Review hosts with items without data, lastclock values, proxy availability and item update intervals."
+        )
+
+    if not summary["review_points"]:
+        summary["review_points"].append(
+            "No major monitoring findings were detected in the analyzed hosts."
+        )
+
+    if not summary["admin_checks"]:
+        summary["admin_checks"].append(
+            "No specific Zabbix administration checks were detected for this group sample."
+        )
+
+    if not summary["management_follow_up"]:
+        summary["management_follow_up"].append(
+            "No management escalation is suggested unless the technical review confirms operational impact."
+        )
+
+    return summary, host_results
+
+
+def print_host_group_health_summary(groupid):
+    """
+    Imprime resumen de salud de un grupo.
+    """
+    summary, host_results = build_host_group_health_summary(groupid)
+
+    print("\nHost Group Health Summary")
+    print("=" * 70)
+    print(f"Group ID: {summary['groupid']}")
+    print(f"Hosts analyzed: {summary['hosts_analyzed']}")
+    print(f"Analysis limit: {summary['analysis_limit']}")
+    print(f"Priority: {summary['priority']}")
+
+    print("\nGroup summary")
+    print("-" * 70)
+    print(f"Enabled hosts: {summary['enabled_hosts']}")
+    print(f"Disabled hosts: {summary['disabled_hosts']}")
+    print(f"Hosts with active problems: {summary['hosts_with_active_problems']}")
+    print(f"Hosts with High/Disaster problems: {summary['hosts_with_high_or_disaster']}")
+    print(f"Hosts with unsupported items: {summary['hosts_with_unsupported_items']}")
+    print(f"Hosts with items without data: {summary['hosts_with_items_without_data']}")
+    print(f"Total unsupported items: {summary['total_unsupported_items']}")
+    print(f"Total items without data: {summary['total_items_without_data']}")
+
+    print("\nReview points")
+    print("-" * 70)
+
+    for point in summary["review_points"]:
+        print(f"- {point}")
+
+    print("\nAdmin technical checks")
+    print("-" * 70)
+
+    for check in summary["admin_checks"]:
+        print(f"- {check}")
+
+    print("\nManagement follow-up")
+    print("-" * 70)
+
+    for follow_up in summary["management_follow_up"]:
+        print(f"- {follow_up}")
+
+    print("\nTop hosts requiring review")
+    print("-" * 70)
+
+    relevant_hosts = [
+        host for host in host_results
+        if host["active_problems"] > 0
+        or host["unsupported_items"] > 0
+        or host["items_without_data"] > 0
+    ]
+
+    if not relevant_hosts:
+        print("- No hosts requiring review in the analyzed sample.")
+        return
+
+    for host in relevant_hosts[:20]:
+        print(
+            f"- {host['hostid']} | {host['name']} | "
+            f"Problems: {host['active_problems']} | "
+            f"High/Disaster: {host['high_or_disaster']} | "
+            f"Unsupported: {host['unsupported_items']} | "
+            f"Without data: {host['items_without_data']}"
+        )
+
+
 def main():
     while True:
         print("\nZabbix Assistant")
@@ -580,6 +859,8 @@ def main():
         print("4. Show host items by hostid")
         print("5. Show host diagnostic report by hostid")
         print("6. Save host diagnostic report to Markdown")
+        print("7. Search host groups")
+        print("8. Show host group health summary")
         print("0. Exit")
         print("\nTip: inside any option, type 'b' to go back to the main menu.")
 
@@ -587,7 +868,7 @@ def main():
 
         try:
             if option == "1":
-                hosts = get_hosts(limit=50)
+                hosts = get_hosts()
                 print_hosts(hosts)
 
             elif option == "2":
@@ -664,6 +945,33 @@ def main():
                     continue
 
                 save_host_diagnostic_report(hostid)
+
+            elif option == "7":
+                search_text = ask_input(
+                    "\nType host group name or part of the name, or 'b' to go back: "
+                )
+
+                if search_text is None:
+                    continue
+
+                if not search_text:
+                    print("\nSearch text cannot be empty.")
+                    continue
+
+                groups = search_host_groups(search_text)
+                print_host_groups(groups)
+
+            elif option == "8":
+                groupid = ask_input("\nType host groupid, or 'b' to go back: ")
+
+                if groupid is None:
+                    continue
+
+                if not groupid:
+                    print("\nHost group ID cannot be empty.")
+                    continue
+
+                print_host_group_health_summary(groupid)
 
             elif option == "0":
                 print("\nExiting...")
