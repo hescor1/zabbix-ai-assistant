@@ -18,3 +18,10 @@ venv/
 # Operating System Files
 Thumbs.db
 .DS_Store
+
+# Local backups
+*_backup_*.py
+*_backup_*.md
+
+# Generated reports
+output/
