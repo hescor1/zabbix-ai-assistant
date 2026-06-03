@@ -253,9 +253,64 @@ def get_host_item_summary(hostid):
     return summary
 
 
+def filter_dependent_problems(problems):
+    """
+    Filtra problemas cuyos triggers dependen de otro trigger que también
+    tiene un problema activo. Esto replica el comportamiento de la web de Zabbix
+    que oculta el trigger dependiente cuando su dependencia está activa.
+    Ejemplo: si >60°C (High) está activo, oculta >50°C (Warning) porque
+    el trigger de >50 depende del de >60.
+    """
+    if not problems:
+        return problems
+
+    # Recolectar los trigger IDs (objectid) de los problemas activos
+    trigger_ids = list(set(
+        str(problem.get("objectid"))
+        for problem in problems
+        if problem.get("objectid")
+    ))
+
+    if not trigger_ids:
+        return problems
+
+    # Consultar triggers con sus dependencias
+    try:
+        triggers = zabbix_request("trigger.get", {
+            "output": ["triggerid"],
+            "triggerids": trigger_ids,
+            "selectDependencies": ["triggerid"]
+        })
+    except Exception:
+        # Si falla, devolver sin filtrar
+        return problems
+
+    # Set de trigger IDs activos (que tienen problema)
+    active_trigger_ids = set(trigger_ids)
+
+    # Identificar triggers que dependen de otro trigger activo
+    triggers_to_hide = set()
+    for trigger in triggers:
+        triggerid = str(trigger.get("triggerid"))
+        dependencies = trigger.get("dependencies", [])
+        for dep in dependencies:
+            dep_triggerid = str(dep.get("triggerid"))
+            if dep_triggerid in active_trigger_ids:
+                # Este trigger depende de otro que también está activo
+                triggers_to_hide.add(triggerid)
+                break
+
+    # Filtrar problemas de triggers dependientes
+    return [
+        problem for problem in problems
+        if str(problem.get("objectid")) not in triggers_to_hide
+    ]
+
+
 def get_host_problems(hostid, limit=20):
     """
     Obtiene problemas activos asociados a un host.
+    Excluye problemas suprimidos, síntomas y dependencias de triggers.
     """
     params = {
         "output": [
@@ -264,7 +319,9 @@ def get_host_problems(hostid, limit=20):
             "name",
             "severity",
             "clock",
-            "acknowledged"
+            "acknowledged",
+            "suppressed",
+            "cause_eventid"
         ],
         "hostids": hostid,
         "sortfield": "eventid",
@@ -272,12 +329,38 @@ def get_host_problems(hostid, limit=20):
         "limit": limit
     }
 
-    return zabbix_request("problem.get", params)
+    try:
+        problems = zabbix_request("problem.get", params)
+    except Exception:
+        params["output"] = [
+            "eventid", "objectid", "name", "severity",
+            "clock", "acknowledged", "suppressed"
+        ]
+        try:
+            problems = zabbix_request("problem.get", params)
+        except Exception:
+            params["output"] = [
+                "eventid", "objectid", "name", "severity",
+                "clock", "acknowledged"
+            ]
+            problems = zabbix_request("problem.get", params)
+
+    filtered = []
+    for problem in problems:
+        if str(problem.get("suppressed", "0")) == "1":
+            continue
+        if str(problem.get("cause_eventid", "0")) != "0":
+            continue
+        filtered.append(problem)
+
+    return filter_dependent_problems(filtered)
 
 
 def get_active_problems(limit=None):
     """
     Obtiene problemas activos generales de Zabbix.
+    Excluye problemas suprimidos (mantenimiento) y problemas síntoma (Zabbix 7.0+).
+    Trae los campos suppressed y cause_eventid para filtrar en Python.
     """
     if limit is None:
         limit = settings.default_problem_limit
@@ -289,14 +372,40 @@ def get_active_problems(limit=None):
             "name",
             "severity",
             "clock",
-            "acknowledged"
+            "acknowledged",
+            "suppressed",
+            "cause_eventid"
         ],
         "sortfield": "eventid",
         "sortorder": "DESC",
         "limit": limit
     }
 
-    return zabbix_request("problem.get", params)
+    try:
+        problems = zabbix_request("problem.get", params)
+    except Exception:
+        params["output"] = [
+            "eventid", "objectid", "name", "severity",
+            "clock", "acknowledged", "suppressed"
+        ]
+        try:
+            problems = zabbix_request("problem.get", params)
+        except Exception:
+            params["output"] = [
+                "eventid", "objectid", "name", "severity",
+                "clock", "acknowledged"
+            ]
+            problems = zabbix_request("problem.get", params)
+
+    filtered = []
+    for problem in problems:
+        if str(problem.get("suppressed", "0")) == "1":
+            continue
+        if str(problem.get("cause_eventid", "0")) != "0":
+            continue
+        filtered.append(problem)
+
+    return filter_dependent_problems(filtered)
 
 
 def get_host_groups(limit=None):

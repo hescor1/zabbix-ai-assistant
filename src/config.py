@@ -1,70 +1,49 @@
 import os
 from dataclasses import dataclass
 from dotenv import load_dotenv
-
 load_dotenv()
-
-
 def normalize_zabbix_url(url):
     """
     Permite usar estas dos formas en el .env:
-
     ZABBIX_URL=http://10.57.1.213/zabbix
     o
     ZABBIX_URL=http://10.57.1.213/zabbix/api_jsonrpc.php
     """
     if not url:
-        raise ValueError("La variable ZABBIX_URL no está definida en el archivo .env")
-
+        raise ValueError("La variable ZABBIX_URL no esta definida en el archivo .env")
     url = url.rstrip("/")
-
     if url.endswith("api_jsonrpc.php"):
         return url
-
     return f"{url}/api_jsonrpc.php"
-
-
 def get_required_env(name):
     """
     Obtiene una variable obligatoria del .env.
     Si no existe, detiene el programa con un mensaje claro.
     """
     value = os.getenv(name)
-
     if not value:
-        raise ValueError(f"La variable {name} no está definida en el archivo .env")
-
+        raise ValueError(f"La variable {name} no esta definida en el archivo .env")
     return value
-
-
 def get_env_int(name, default):
     """
-    Obtiene una variable numérica del .env.
-    Si no existe o no es válida, usa el valor por defecto.
+    Obtiene una variable numerica del .env.
+    Si no existe o no es valida, usa el valor por defecto.
     """
     value = os.getenv(name)
-
     if not value:
         return default
-
     try:
         return int(value)
     except ValueError:
         return default
-
-
 def get_env_bool(name, default=False):
     """
     Convierte variables tipo true/false desde el .env.
     """
     value = os.getenv(name)
-
     if value is None:
         return default
-
     return value.strip().lower() in ["true", "1", "yes", "y"]
-
-
 @dataclass(frozen=True)
 class Settings:
     environment: str
@@ -78,8 +57,12 @@ class Settings:
     report_output_dir: str
     snapshot_output_dir: str
     report_dry_run: bool
-
-
+    smtp_server: str
+    smtp_port: int
+    smtp_user: str
+    smtp_password: str
+    smtp_from: str
+    smtp_to: str
 settings = Settings(
     environment=os.getenv("ENVIRONMENT", "lab"),
     zabbix_url=get_required_env("ZABBIX_URL"),
@@ -91,5 +74,11 @@ settings = Settings(
     default_problem_limit=get_env_int("DEFAULT_PROBLEM_LIMIT", 100),
     report_output_dir=os.getenv("REPORT_OUTPUT_DIR", "output/reports"),
     snapshot_output_dir=os.getenv("SNAPSHOT_OUTPUT_DIR", "output/snapshots"),
-    report_dry_run=get_env_bool("REPORT_DRY_RUN", True)
+    report_dry_run=get_env_bool("REPORT_DRY_RUN", True),
+    smtp_server=os.getenv("SMTP_SERVER", "smtp.gmail.com"),
+    smtp_port=get_env_int("SMTP_PORT", 587),
+    smtp_user=os.getenv("SMTP_USER", ""),
+    smtp_password=os.getenv("SMTP_PASSWORD", ""),
+    smtp_from=os.getenv("SMTP_FROM", ""),
+    smtp_to=os.getenv("SMTP_TO", "")
 )
