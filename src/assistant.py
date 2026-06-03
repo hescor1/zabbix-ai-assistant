@@ -1430,6 +1430,7 @@ def main():
                 save_host_diagnostic_report(hostid)
             elif option == "12":
                 imprimir_resumen_diario_zabbix()
+                input("\nPresiona Enter para volver al menu...")
             elif option == "13":
                 mostrar_cuerpo_correo_noc()
             elif option == "0":
