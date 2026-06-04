@@ -435,13 +435,18 @@ def get_mttr_and_aging():
         mttr_7d = sum(r["duration"] for r in resolved_7d) / len(resolved_7d)
 
     # Problemas activos para aging
-    active = zabbix_request("problem.get", {
-        "output": ["eventid", "objectid", "name", "severity", "clock"],
+    active_raw = zabbix_request("problem.get", {
+        "output": ["eventid", "objectid", "name", "severity", "clock", "r_clock", "cause_eventid"],
         "recent": True,
         "sortfield": "eventid",
         "sortorder": "DESC",
         "suppressed": False,
-    })
+    }) or []
+    active = [
+        p for p in active_raw
+        if int(p.get("r_clock", "0")) == 0
+        and str(p.get("cause_eventid", "0")) == "0"
+    ]
 
     # Calcular aging
     aging_buckets = {"< 1h": 0, "1h - 4h": 0, "4h - 24h": 0, "1d - 7d": 0, "> 7d": 0}
@@ -526,4 +531,104 @@ def print_mttr_and_aging():
         print(f"  -> {data['aging']['1d - 7d']} problema(s) entre 1 y 7 dias. Verificar si tienen responsable asignado.")
     if data["resolved_24h"] == 0:
         print("  -> No se resolvio ningun problema en las ultimas 24h.")
+    print("=" * 70)
+
+
+def print_sre_report():
+    print_golden_signals_report()
+    data = get_mttr_and_aging()
+
+    print("=" * 70)
+    print("MTTR (Tiempo Medio de Reparacion)")
+    print("-" * 70)
+    print(f"  Ultimas 24h:  {format_duration(data['mttr_24h'])}  ({data['resolved_24h']} problemas resueltos)")
+    print(f"  Ultimos 7d:   {format_duration(data['mttr_7d'])}  ({data['resolved_7d']} problemas resueltos)")
+
+    print()
+    print(f"AGING — Problemas activos: {data['active_count']}")
+    print("-" * 70)
+    for bucket, count in data["aging"].items():
+        if data["active_count"] > 0:
+            pct = round(count / data["active_count"] * 100)
+        else:
+            pct = 0
+        bar = "#" * max(0, pct // 5)
+        print(f"  {bucket:<12} {count:>4} ({pct:>2}%) {bar}")
+
+    print()
+    print("INSIGHTS MTTR/AGING")
+    print("-" * 70)
+    if data["mttr_24h"] is not None and data["mttr_24h"] > 3600:
+        print(f"  -> MTTR de {format_duration(data['mttr_24h'])} en 24h. Meta SRE: < 1h para High/Disaster.")
+    if data["aging"].get("> 7d", 0) > 0:
+        print(f"  -> {data['aging']['> 7d']} problema(s) llevan mas de 7 dias abiertos. Requieren escalamiento.")
+    if data["aging"].get("1d - 7d", 0) > 0:
+        print(f"  -> {data['aging']['1d - 7d']} problema(s) entre 1 y 7 dias. Verificar si tienen responsable asignado.")
+    if data["resolved_24h"] == 0:
+        print("  -> No se resolvio ningun problema en las ultimas 24h.")
+    print("=" * 70)
+
+
+def get_executive_summary():
+    """
+    Retorna un resumen ejecutivo: solo los numeros clave que necesita gerencia.
+    """
+    report = get_golden_signals_report()
+    mttr_data = get_mttr_and_aging()
+
+    # Contar problemas High/Disaster
+    high_count = 0
+    if report.get("signals"):
+        for signal_data in report["signals"].values():
+            for p in signal_data["patterns"]:
+                if p["severity_max"] >= 4:
+                    high_count += p["problem_count"]
+
+    # Problemas criticos sin atender > 7 dias
+    critical_aging = mttr_data["aging"].get("> 7d", 0)
+
+    return {
+        "timestamp": report.get("timestamp", ""),
+        "total_active": report.get("total", 0),
+        "high_disaster": high_count,
+        "mttr_24h": mttr_data["mttr_24h"],
+        "mttr_7d": mttr_data["mttr_7d"],
+        "critical_aging": critical_aging,
+        "resolved_24h": mttr_data["resolved_24h"],
+        "aging": mttr_data["aging"],
+    }
+
+
+def print_executive_summary():
+    """Vista ejecutiva para gerencia: 5-7 lineas con lo critico."""
+    print("\nGenerando resumen ejecutivo...")
+    data = get_executive_summary()
+
+    print()
+    print("=" * 70)
+    print(f"RESUMEN EJECUTIVO — {data['timestamp']}")
+    print("=" * 70)
+    print()
+    print(f"  Problemas activos:           {data['total_active']}")
+    print(f"  Severidad alta/critica:      {data['high_disaster']}")
+    print(f"  Sin atender mas de 7 dias:   {data['critical_aging']}")
+    print(f"  MTTR ultimas 24h:            {format_duration(data['mttr_24h'])}")
+    print(f"  Problemas resueltos hoy:     {data['resolved_24h']}")
+    print()
+
+    # Conclusion automatica
+    print("ESTADO GENERAL")
+    print("-" * 70)
+    if data["critical_aging"] > 0:
+        print(f"  ATENCION: {data['critical_aging']} problema(s) sin atender por mas de 7 dias.")
+        print(f"  Requiere intervencion de los responsables de dominio.")
+    elif data["high_disaster"] > 0:
+        print(f"  Hay {data['high_disaster']} problema(s) de severidad alta activos.")
+        print(f"  NOC esta en seguimiento.")
+    else:
+        print("  Operacion estable. No hay problemas criticos activos.")
+
+    if data["mttr_24h"] is not None and data["mttr_24h"] > 3600:
+        print(f"  MTTR esta por encima de la meta SRE (1h para High/Disaster).")
+
     print("=" * 70)
