@@ -1,3 +1,4 @@
+from signals import print_golden_signals_report, print_mttr_and_aging
 from datetime import datetime
 from pathlib import Path
 from difflib import SequenceMatcher
@@ -1321,6 +1322,8 @@ def main():
         print("11. Search host and save diagnostic Markdown")
         print("12. Generar resumen diario de salud de Zabbix")
         print("13. Generar cuerpo de correo NOC (vista previa)")
+        print("14. Reporte Golden Signals (SRE)")
+        print("15. Metricas SRE - MTTR y Aging")
         print("0. Exit")
         print("\nTip: inside any option, type 'b' to go back to the main menu.")
         option = input("\nChoose an option: ").strip()
@@ -1433,6 +1436,12 @@ def main():
                 input("\nPresiona Enter para volver al menu...")
             elif option == "13":
                 mostrar_cuerpo_correo_noc()
+            elif option == "14":
+                print_golden_signals_report()
+                input("\nPresiona Enter para volver al menu...")
+            elif option == "15":
+                print_mttr_and_aging()
+                input("\nPresiona Enter para volver al menu...")
             elif option == "0":
                 print("\nExiting...")
                 break

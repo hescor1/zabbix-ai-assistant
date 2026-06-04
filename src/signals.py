@@ -363,3 +363,159 @@ def print_golden_signals_report():
         for insight in insights:
             print(f"  -> {insight}")
         print("=" * 70)
+
+
+def get_mttr_and_aging():
+    """
+    Calcula MTTR de problemas resueltos en ultimas 24h
+    y aging de problemas activos.
+    """
+    from datetime import timedelta
+
+    now = datetime.now()
+    time_24h = int((now - timedelta(hours=24)).timestamp())
+    time_7d = int((now - timedelta(days=7)).timestamp())
+
+    # Problemas resueltos en ultimas 24h para MTTR
+    resolved = zabbix_request("problem.get", {
+        "output": ["eventid", "objectid", "name", "severity", "clock", "r_clock"],
+        "time_from": time_24h,
+        "recent": False,
+        "sortfield": "eventid",
+        "sortorder": "DESC",
+        "suppressed": False,
+    })
+
+    # Problemas resueltos en ultimos 7 dias para MTTR semanal
+    resolved_7d = zabbix_request("problem.get", {
+        "output": ["eventid", "objectid", "name", "severity", "clock", "r_clock"],
+        "time_from": time_7d,
+        "recent": False,
+        "sortfield": "eventid",
+        "sortorder": "DESC",
+        "suppressed": False,
+    })
+
+    # Problemas activos para aging
+    active = zabbix_request("problem.get", {
+        "output": ["eventid", "objectid", "name", "severity", "clock"],
+        "recent": True,
+        "sortfield": "eventid",
+        "sortorder": "DESC",
+        "suppressed": False,
+    })
+
+    # Calcular MTTR 24h
+    mttr_24h = None
+    resolved_24h_count = 0
+    if resolved:
+        durations = []
+        for p in resolved:
+            r = int(p.get("r_clock", "0"))
+            c = int(p["clock"])
+            if r > 0:
+                durations.append(r - c)
+                resolved_24h_count += 1
+        if durations:
+            avg = sum(durations) / len(durations)
+            mttr_24h = avg
+
+    # Calcular MTTR 7d
+    mttr_7d = None
+    resolved_7d_count = 0
+    if resolved_7d:
+        durations = []
+        for p in resolved_7d:
+            r = int(p.get("r_clock", "0"))
+            c = int(p["clock"])
+            if r > 0:
+                durations.append(r - c)
+                resolved_7d_count += 1
+        if durations:
+            avg = sum(durations) / len(durations)
+            mttr_7d = avg
+
+    # Calcular aging de activos
+    aging_buckets = {"< 1h": 0, "1h - 4h": 0, "4h - 24h": 0, "1d - 7d": 0, "> 7d": 0}
+    now_ts = int(now.timestamp())
+
+    if active:
+        for p in active:
+            age_sec = now_ts - int(p["clock"])
+            age_hours = age_sec / 3600
+            if age_hours < 1:
+                aging_buckets["< 1h"] += 1
+            elif age_hours < 4:
+                aging_buckets["1h - 4h"] += 1
+            elif age_hours < 24:
+                aging_buckets["4h - 24h"] += 1
+            elif age_hours < 168:
+                aging_buckets["1d - 7d"] += 1
+            else:
+                aging_buckets["> 7d"] += 1
+
+    return {
+        "mttr_24h": mttr_24h,
+        "mttr_7d": mttr_7d,
+        "resolved_24h": resolved_24h_count,
+        "resolved_7d": resolved_7d_count,
+        "active_count": len(active) if active else 0,
+        "aging": aging_buckets,
+    }
+
+
+def format_duration(seconds):
+    """Convierte segundos a formato legible."""
+    if seconds is None:
+        return "N/A"
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    if seconds < 3600:
+        return f"{int(seconds/60)}m"
+    if seconds < 86400:
+        hours = seconds / 3600
+        return f"{hours:.1f}h"
+    days = seconds / 86400
+    return f"{days:.1f}d"
+
+
+def print_mttr_and_aging():
+    """Imprime MTTR y aging en terminal."""
+    print("\nCalculando MTTR y aging...")
+    data = get_mttr_and_aging()
+
+    print()
+    print("=" * 70)
+    print("METRICAS SRE — MTTR & AGING")
+    print("=" * 70)
+
+    print()
+    print("MTTR (Tiempo Medio de Reparacion)")
+    print("-" * 70)
+    print(f"  Ultimas 24h:  {format_duration(data['mttr_24h'])}  ({data['resolved_24h']} problemas resueltos)")
+    print(f"  Ultimos 7d:   {format_duration(data['mttr_7d'])}  ({data['resolved_7d']} problemas resueltos)")
+
+    print()
+    print(f"AGING — Problemas activos: {data['active_count']}")
+    print("-" * 70)
+    for bucket, count in data["aging"].items():
+        if data["active_count"] > 0:
+            pct = round(count / data["active_count"] * 100)
+        else:
+            pct = 0
+        bar = "#" * max(0, pct // 5)
+        print(f"  {bucket:<12} {count:>4} ({pct:>2}%) {bar}")
+
+    # Insights
+    print()
+    print("INSIGHTS")
+    print("-" * 70)
+    if data["mttr_24h"] is not None and data["mttr_24h"] > 3600:
+        print(f"  -> MTTR de {format_duration(data['mttr_24h'])} en 24h. Meta SRE: < 1h para High/Disaster.")
+    if data["aging"].get("> 7d", 0) > 0:
+        print(f"  -> {data['aging']['> 7d']} problema(s) llevan mas de 7 dias abiertos. Requieren escalamiento.")
+    if data["aging"].get("1d - 7d", 0) > 0:
+        print(f"  -> {data['aging']['1d - 7d']} problema(s) entre 1 y 7 dias. Verificar si tienen responsable asignado.")
+    if data["resolved_24h"] == 0:
+        print("  -> No se resolvio ningun problema en las ultimas 24h.")
+    print("=" * 70)
