@@ -373,34 +373,66 @@ def print_golden_signals_report():
 
 def get_mttr_and_aging():
     """
-    Calcula MTTR de problemas resueltos en ultimas 24h
-    y aging de problemas activos.
+    Calcula MTTR usando event.get y aging de problemas activos.
     """
     from datetime import timedelta
-
     now = datetime.now()
     time_24h = int((now - timedelta(hours=24)).timestamp())
     time_7d = int((now - timedelta(days=7)).timestamp())
 
-    # Problemas resueltos en ultimas 24h para MTTR
-    resolved = zabbix_request("problem.get", {
-        "output": ["eventid", "objectid", "name", "severity", "clock", "r_clock"],
-        "time_from": time_24h,
-        "recent": False,
-        "sortfield": "eventid",
-        "sortorder": "DESC",
-        "suppressed": False,
-    })
-
-    # Problemas resueltos en ultimos 7 dias para MTTR semanal
-    resolved_7d = zabbix_request("problem.get", {
-        "output": ["eventid", "objectid", "name", "severity", "clock", "r_clock"],
+    # Obtener eventos PROBLEM (value=1) de ultimos 7 dias
+    problem_events = zabbix_request("event.get", {
+        "output": ["eventid", "clock", "name", "severity", "r_eventid"],
         "time_from": time_7d,
-        "recent": False,
+        "source": 0,
+        "object": 0,
+        "value": 1,
         "sortfield": "eventid",
         "sortorder": "DESC",
-        "suppressed": False,
-    })
+    }) or []
+
+    # Buscar recovery times para los que tienen r_eventid
+    resolved = []
+    recovery_ids = [p["r_eventid"] for p in problem_events if p.get("r_eventid", "0") != "0"]
+
+    recovery_map = {}
+    if recovery_ids:
+        for i in range(0, len(recovery_ids), 500):
+            batch = recovery_ids[i:i+500]
+            recoveries = zabbix_request("event.get", {
+                "eventids": batch,
+                "output": ["eventid", "clock"],
+            }) or []
+            for r in recoveries:
+                recovery_map[r["eventid"]] = int(r["clock"])
+
+    for p in problem_events:
+        rid = p.get("r_eventid", "0")
+        if rid != "0" and rid in recovery_map:
+            p_clock = int(p["clock"])
+            r_clock = recovery_map[rid]
+            resolved.append({
+                "name": p["name"],
+                "clock": p_clock,
+                "r_clock": r_clock,
+                "duration": r_clock - p_clock,
+            })
+
+    # Separar 24h y 7d
+    resolved_24h = [r for r in resolved if r["clock"] >= time_24h]
+    resolved_7d = resolved
+
+    # MTTR 24h
+    mttr_24h = None
+    resolved_24h_count = len(resolved_24h)
+    if resolved_24h:
+        mttr_24h = sum(r["duration"] for r in resolved_24h) / len(resolved_24h)
+
+    # MTTR 7d
+    mttr_7d = None
+    resolved_7d_count = len(resolved_7d)
+    if resolved_7d:
+        mttr_7d = sum(r["duration"] for r in resolved_7d) / len(resolved_7d)
 
     # Problemas activos para aging
     active = zabbix_request("problem.get", {
@@ -411,37 +443,7 @@ def get_mttr_and_aging():
         "suppressed": False,
     })
 
-    # Calcular MTTR 24h
-    mttr_24h = None
-    resolved_24h_count = 0
-    if resolved:
-        durations = []
-        for p in resolved:
-            r = int(p.get("r_clock", "0"))
-            c = int(p["clock"])
-            if r > 0:
-                durations.append(r - c)
-                resolved_24h_count += 1
-        if durations:
-            avg = sum(durations) / len(durations)
-            mttr_24h = avg
-
-    # Calcular MTTR 7d
-    mttr_7d = None
-    resolved_7d_count = 0
-    if resolved_7d:
-        durations = []
-        for p in resolved_7d:
-            r = int(p.get("r_clock", "0"))
-            c = int(p["clock"])
-            if r > 0:
-                durations.append(r - c)
-                resolved_7d_count += 1
-        if durations:
-            avg = sum(durations) / len(durations)
-            mttr_7d = avg
-
-    # Calcular aging de activos
+    # Calcular aging
     aging_buckets = {"< 1h": 0, "1h - 4h": 0, "4h - 24h": 0, "1d - 7d": 0, "> 7d": 0}
     now_ts = int(now.timestamp())
 
