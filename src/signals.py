@@ -89,6 +89,15 @@ SEV_NAMES = {
 }
 
 
+
+def best_group(group_names):
+    """Elige el grupo mas especifico (mas niveles de ruta)."""
+    if not group_names:
+        return "Sin grupo"
+    scored = sorted(group_names, key=lambda g: (g.count("/"), len(g)), reverse=True)
+    return scored[0]
+
+
 def classify_problem(problem_name):
     """Clasifica un problema y retorna (signal, patron_agrupador)."""
     name_lower = problem_name.lower()
@@ -185,8 +194,8 @@ def get_golden_signals_report():
         group["unique_names"].add(p["name"])
         if p["acknowledged"] != "1":
             group["not_acked"] += 1
-        for g in t_info["groups"]:
-            group["groups"][g] += 1
+        best = best_group(t_info["groups"])
+        group["groups"][best] += 1
 
     result = {
         "total": len(problems),
