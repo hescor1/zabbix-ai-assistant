@@ -1,4 +1,5 @@
 from signals import print_sre_report, print_executive_summary, print_report_by_responsible, print_monitoring_quality_report, print_noc_report
+from mailer import send_report_email, test_smtp
 from datetime import datetime
 from pathlib import Path
 from difflib import SequenceMatcher
@@ -1306,164 +1307,67 @@ def mostrar_cuerpo_correo_noc():
 
 
 def main():
+    """Menu principal del Zabbix SRE Assistant."""
     while True:
-        print("\nZabbix Assistant")
-        print("-" * 50)
-        print("1. List hosts")
-        print("2. Search host by name")
-        print("3. Show host details by hostid")
-        print("4. Show host items by hostid")
-        print("5. Show host diagnostic report by hostid")
-        print("6. Save host diagnostic report to Markdown")
-        print("7. Search host groups")
-        print("8. Show host group health summary")
-        print("9. Smart search hosts by name, IP, DNS, group or hostid")
-        print("10. Search host and run diagnostic")
-        print("11. Search host and save diagnostic Markdown")
-        print("12. Generar resumen diario de salud de Zabbix")
-        print("13. Generar cuerpo de correo NOC (vista previa)")
-        print("14. Reporte SRE (Golden Signals + MTTR + Aging)")
-        print("15. Resumen ejecutivo (vista gerencia)")
-        print("16. Reporte por responsable (vista dominio)")
-        print("17. Calidad del monitoreo (admin Zabbix)")
-        print("18. Reporte NOC operativo (vista turno)")
-        print("0. Exit")
-        print("\nTip: inside any option, type 'b' to go back to the main menu.")
-        option = input("\nChoose an option: ").strip()
+        print("\n=== Zabbix SRE Assistant ===\n")
+        print("REPORTES SRE")
+        print("  1. Reporte NOC operativo (vista turno)")
+        print("  2. Reporte SRE completo (Golden Signals + MTTR + Aging)")
+        print("  3. Resumen ejecutivo (vista gerencia)")
+        print("  4. Reporte por responsable (vista dominio)")
+        print("  5. Calidad del monitoreo (admin Zabbix)")
+        print()
+        print("ENVIO POR CORREO")
+        print("  6. Enviar Reporte NOC por correo")
+        print("  7. Enviar Reporte SRE por correo")
+        print("  8. Enviar Resumen ejecutivo por correo")
+        print("  9. Enviar Calidad del monitoreo por correo")
+        print("  10. Probar configuracion SMTP")
+        print()
+        print("  0. Salir")
+        option = input("\nSeleccione una opcion: ").strip()
+
         try:
             if not option:
-                print("\nNo option selected. Please choose a valid menu option.")
                 continue
-            if option == "1":
-                hosts = get_hosts()
-                print_hosts(hosts)
-            elif option == "2":
-                search_text = ask_input(
-                    "\nType host name or part of the name, or 'b' to go back: "
-                )
-                if search_text is None:
-                    continue
-                if not search_text:
-                    print("\nSearch text cannot be empty.")
-                    continue
-                hosts = search_hosts(search_text)
-                print_hosts(hosts)
-            elif option == "3":
-                hostid = ask_input("\nType hostid, or 'b' to go back: ")
-                if hostid is None:
-                    continue
-                if not hostid:
-                    print("\nHost ID cannot be empty.")
-                    continue
-                host = get_host_details(hostid)
-                print_host_details(host)
-            elif option == "4":
-                hostid = ask_input("\nType hostid, or 'b' to go back: ")
-                if hostid is None:
-                    continue
-                if not hostid:
-                    print("\nHost ID cannot be empty.")
-                    continue
-                search_text = ask_input(
-                    "\nFilter items by name or key. Press Enter to show first 100 items, or type 'b' to go back: "
-                )
-                if search_text is None:
-                    continue
-                if not search_text:
-                    search_text = None
-                items = get_host_items(hostid, search_text=search_text, limit=100)
-                print_host_items(items)
-            elif option == "5":
-                hostid = ask_input("\nType hostid, or 'b' to go back: ")
-                if hostid is None:
-                    continue
-                if not hostid:
-                    print("\nHost ID cannot be empty.")
-                    continue
-                print_host_diagnostic_report(hostid)
-            elif option == "6":
-                hostid = ask_input("\nType hostid, or 'b' to go back: ")
-                if hostid is None:
-                    continue
-                if not hostid:
-                    print("\nHost ID cannot be empty.")
-                    continue
-                save_host_diagnostic_report(hostid)
-            elif option == "7":
-                search_text = ask_input(
-                    "\nType host group name or part of the name, or 'b' to go back: "
-                )
-                if search_text is None:
-                    continue
-                if not search_text:
-                    print("\nSearch text cannot be empty.")
-                    continue
-                groups = smart_search_host_groups(search_text)
-                if groups:
-                    print_host_groups(groups)
-                else:
-                    print(f"\nNo host groups found for: {search_text}")
-                    print("No similar visible groups were found for this API user.")
-                    print("Try another word, or validate whether the API user can see the expected host groups.")
-            elif option == "8":
-                groupid = ask_input("\nType host groupid, or 'b' to go back: ")
-                if groupid is None:
-                    continue
-                if not groupid:
-                    print("\nHost group ID cannot be empty.")
-                    continue
-                print_host_group_health_summary(groupid)
-            elif option == "9":
-                search_text = ask_input(
-                    "\nType host name, IP, DNS, group, hostid or part of it, or 'b' to go back: "
-                )
-                if search_text is None:
-                    continue
-                if not search_text:
-                    print("\nSearch text cannot be empty.")
-                    continue
-                hosts = smart_search_hosts(search_text)
-                print_smart_host_results(hosts)
-            elif option == "10":
-                hostid = search_host_and_select_hostid()
-                if hostid is None:
-                    continue
-                print_host_diagnostic_report(hostid)
-            elif option == "11":
-                hostid = search_host_and_select_hostid()
-                if hostid is None:
-                    continue
-                save_host_diagnostic_report(hostid)
-            elif option == "12":
-                imprimir_resumen_diario_zabbix()
-                input("\nPresiona Enter para volver al menu...")
-            elif option == "13":
-                mostrar_cuerpo_correo_noc()
-            elif option == "14":
-                print_sre_report()
-                input("\nPresiona Enter para volver al menu...")
-            elif option == "15":
-                print_executive_summary()
-                input("\nPresiona Enter para volver al menu...")
-            elif option == "16":
-                print_report_by_responsible()
-                input("\nPresiona Enter para volver al menu...")
-            elif option == "17":
-                print_monitoring_quality_report()
-                input("\nPresiona Enter para volver al menu...")
-            elif option == "18":
+            elif option == "1":
                 print_noc_report()
                 input("\nPresiona Enter para volver al menu...")
+            elif option == "2":
+                print_sre_report()
+                input("\nPresiona Enter para volver al menu...")
+            elif option == "3":
+                print_executive_summary()
+                input("\nPresiona Enter para volver al menu...")
+            elif option == "4":
+                print_report_by_responsible()
+                input("\nPresiona Enter para volver al menu...")
+            elif option == "5":
+                print_monitoring_quality_report()
+                input("\nPresiona Enter para volver al menu...")
+            elif option == "6":
+                send_report_email("noc")
+                input("\nPresiona Enter para volver al menu...")
+            elif option == "7":
+                send_report_email("sre")
+                input("\nPresiona Enter para volver al menu...")
+            elif option == "8":
+                send_report_email("ejecutivo")
+                input("\nPresiona Enter para volver al menu...")
+            elif option == "9":
+                send_report_email("admin")
+                input("\nPresiona Enter para volver al menu...")
+            elif option == "10":
+                test_smtp()
+                input("\nPresiona Enter para volver al menu...")
             elif option == "0":
-                print("\nExiting...")
+                print("\nSaliendo...")
                 break
-            elif is_back_command(option):
-                print("\nYou are already in the main menu.")
             else:
-                print("\nInvalid option.")
+                print("\nOpcion invalida.")
         except Exception as error:
-            print("\nAn error occurred while executing the option.")
-            print(f"Details: {error}")
+            print("\nOcurrio un error ejecutando la opcion.")
+            print(f"Detalles: {error}")
 
 
 if __name__ == "__main__":
