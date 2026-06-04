@@ -969,3 +969,152 @@ def print_monitoring_quality_report():
     if not unsup and not data["hosts_no_responsable"] and not noisy:
         print("  -> Calidad del monitoreo: OK. Sin acciones pendientes.")
     print("=" * 70)
+
+
+def get_noc_report():
+    """
+    Reporte operativo NOC: solo problemas accionables, ordenados por prioridad.
+    """
+    from datetime import timedelta
+    now = datetime.now()
+    now_ts = int(now.timestamp())
+
+    problems = zabbix_request("problem.get", {
+        "output": ["eventid", "objectid", "name", "severity", "clock", "acknowledged", "cause_eventid", "r_clock"],
+        "recent": True,
+        "sortfield": "eventid",
+        "sortorder": "DESC",
+        "suppressed": False,
+        "selectTags": "extend",
+    }) or []
+
+    # Filtrar resueltos y sintomas
+    problems = [
+        p for p in problems
+        if int(p.get("r_clock", "0")) == 0
+        and str(p.get("cause_eventid", "0")) == "0"
+    ]
+
+    # Excluir informativos (severity 0 y 1)
+    problems = [p for p in problems if int(p["severity"]) >= 2]
+
+    if not problems:
+        return []
+
+    # Obtener hosts y tags
+    trigger_ids = list({p["objectid"] for p in problems})
+    trigger_map = {}
+    for i in range(0, len(trigger_ids), 500):
+        batch = trigger_ids[i:i + 500]
+        triggers = zabbix_request("trigger.get", {
+            "triggerids": batch,
+            "output": ["triggerid"],
+            "selectHosts": ["hostid", "name"],
+            "selectHostGroups": ["name"],
+        }) or []
+        for t in triggers:
+            hosts = t.get("hosts", [])
+            groups = t.get("hostgroups", [])
+            trigger_map[t["triggerid"]] = {
+                "host_name": hosts[0]["name"] if hosts else "?",
+                "hostid": hosts[0]["hostid"] if hosts else None,
+                "groups": [g["name"] for g in groups] if groups else [],
+            }
+
+    # Obtener responsables de los hosts
+    host_ids = list({info["hostid"] for info in trigger_map.values() if info["hostid"]})
+    host_resp_map = {}
+    if host_ids:
+        for i in range(0, len(host_ids), 500):
+            batch = host_ids[i:i + 500]
+            hosts = zabbix_request("host.get", {
+                "hostids": batch,
+                "output": ["hostid"],
+                "selectTags": "extend",
+            }) or []
+            for h in hosts:
+                resp = next((t["value"] for t in h.get("tags", []) if t["tag"] == "responsable"), "sin asignar")
+                host_resp_map[h["hostid"]] = resp
+
+    # Enriquecer
+    enriched = []
+    for p in problems:
+        t_info = trigger_map.get(p["objectid"], {})
+        responsible = host_resp_map.get(t_info.get("hostid"), "sin asignar")
+        age_seconds = now_ts - int(p["clock"])
+        enriched.append({
+            "name": p["name"],
+            "severity": int(p["severity"]),
+            "host": t_info.get("host_name", "?"),
+            "groups": t_info.get("groups", []),
+            "responsible": responsible,
+            "acknowledged": p["acknowledged"] == "1",
+            "age_seconds": age_seconds,
+        })
+
+    # Ordenar: severidad DESC, edad ASC (recientes primero dentro de misma severidad)
+    enriched.sort(key=lambda x: (-x["severity"], -x["age_seconds"]))
+
+    return enriched
+
+
+def format_age(seconds):
+    """Formato legible de edad."""
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{int(seconds/60)}m"
+    if seconds < 86400:
+        return f"{int(seconds/3600)}h"
+    return f"{int(seconds/86400)}d"
+
+
+def print_noc_report():
+    """Reporte NOC operativo: lista accionable para el operador."""
+    print("\nGenerando reporte NOC...")
+    problems = get_noc_report()
+
+    print()
+    print("=" * 78)
+    print(f"REPORTE NOC — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print(f"Problemas accionables: {len(problems)}")
+    print("=" * 78)
+
+    if not problems:
+        print("\n  Sin problemas activos accionables. Operacion estable.")
+        print("=" * 78)
+        return
+
+    # Agrupar por severidad
+    sev_names = {2: "Warning", 3: "Average", 4: "High", 5: "Disaster"}
+
+    current_sev = None
+    for p in problems:
+        if p["severity"] != current_sev:
+            current_sev = p["severity"]
+            sev_label = sev_names.get(current_sev, "?")
+            count = sum(1 for x in problems if x["severity"] == current_sev)
+            print(f"\n[{sev_label.upper()}] — {count} problema(s)")
+            print("-" * 78)
+
+        ack = "ACK" if p["acknowledged"] else "---"
+        age = format_age(p["age_seconds"])
+        name = p["name"][:50]
+        print(f"  [{ack}] {age:>5} | {p['host']:<28} | {p['responsible']:<12} | {name}")
+
+    # Resumen
+    print()
+    print("=" * 78)
+    by_resp = defaultdict(int)
+    by_sev = defaultdict(int)
+    no_ack = 0
+    for p in problems:
+        by_resp[p["responsible"]] += 1
+        by_sev[p["severity"]] += 1
+        if not p["acknowledged"]:
+            no_ack += 1
+
+    print(f"  Sin reconocer: {no_ack} de {len(problems)}")
+    print(f"  Por severidad: " + ", ".join(f"{sev_names.get(s,'?')}: {c}" for s, c in sorted(by_sev.items(), reverse=True)))
+    print(f"  Por dominio:   " + ", ".join(f"{r}: {c}" for r, c in sorted(by_resp.items(), key=lambda x: -x[1])))
+    print("=" * 78)
