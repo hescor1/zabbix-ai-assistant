@@ -117,7 +117,7 @@ def get_golden_signals_report():
         problems = zabbix_request("problem.get", {
             "output": [
                 "eventid", "objectid", "name", "severity",
-                "clock", "acknowledged", "cause_eventid",
+                "clock", "acknowledged", "cause_eventid", "r_clock",
             ],
             "recent": True,
             "sortfield": "eventid",
@@ -142,6 +142,12 @@ def get_golden_signals_report():
     problems = [
         p for p in problems
         if str(p.get("cause_eventid", "0")) == "0"
+    ]
+
+    # Filtrar problemas ya resueltos
+    problems = [
+        p for p in problems
+        if int(p.get("r_clock", "0")) == 0
     ]
 
     if not problems:
