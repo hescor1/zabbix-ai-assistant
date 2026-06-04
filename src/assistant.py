@@ -1,4 +1,4 @@
-from signals import print_sre_report, print_executive_summary
+from signals import print_sre_report, print_executive_summary, print_report_by_responsible, print_monitoring_quality_report
 from datetime import datetime
 from pathlib import Path
 from difflib import SequenceMatcher
@@ -1324,6 +1324,8 @@ def main():
         print("13. Generar cuerpo de correo NOC (vista previa)")
         print("14. Reporte SRE (Golden Signals + MTTR + Aging)")
         print("15. Resumen ejecutivo (vista gerencia)")
+        print("16. Reporte por responsable (vista dominio)")
+        print("17. Calidad del monitoreo (admin Zabbix)")
         print("0. Exit")
         print("\nTip: inside any option, type 'b' to go back to the main menu.")
         option = input("\nChoose an option: ").strip()
@@ -1441,6 +1443,12 @@ def main():
                 input("\nPresiona Enter para volver al menu...")
             elif option == "15":
                 print_executive_summary()
+                input("\nPresiona Enter para volver al menu...")
+            elif option == "16":
+                print_report_by_responsible()
+                input("\nPresiona Enter para volver al menu...")
+            elif option == "17":
+                print_monitoring_quality_report()
                 input("\nPresiona Enter para volver al menu...")
             elif option == "0":
                 print("\nExiting...")

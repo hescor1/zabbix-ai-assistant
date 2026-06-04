@@ -632,3 +632,340 @@ def print_executive_summary():
         print(f"  MTTR esta por encima de la meta SRE (1h para High/Disaster).")
 
     print("=" * 70)
+
+
+def get_report_by_responsible(responsible):
+    """
+    Filtra problemas por tag 'responsable'.
+    Retorna report estructurado solo con los hosts de ese responsable.
+    """
+    try:
+        problems = zabbix_request("problem.get", {
+            "output": [
+                "eventid", "objectid", "name", "severity",
+                "clock", "acknowledged", "cause_eventid", "r_clock",
+            ],
+            "recent": True,
+            "sortfield": "eventid",
+            "sortorder": "DESC",
+            "suppressed": False,
+            "selectTags": "extend",
+        })
+    except Exception:
+        problems = []
+
+    if not problems:
+        return None
+
+    # Filtrar resueltos y sintomas
+    problems = [
+        p for p in problems
+        if int(p.get("r_clock", "0")) == 0
+        and str(p.get("cause_eventid", "0")) == "0"
+    ]
+
+    # Obtener triggers con sus hosts y tags de host
+    trigger_ids = list({p["objectid"] for p in problems})
+    trigger_map = {}
+
+    for i in range(0, len(trigger_ids), 500):
+        batch = trigger_ids[i:i + 500]
+        triggers = zabbix_request("trigger.get", {
+            "triggerids": batch,
+            "output": ["triggerid"],
+            "selectHosts": ["hostid", "name"],
+            "selectHostGroups": ["name"],
+        })
+        if triggers:
+            for t in triggers:
+                hosts = t.get("hosts", [])
+                groups = t.get("hostgroups", [])
+                host_info = {
+                    "host_name": hosts[0]["name"] if hosts else "?",
+                    "hostid": hosts[0]["hostid"] if hosts else None,
+                    "groups": [g["name"] for g in groups] if groups else [],
+                }
+                trigger_map[t["triggerid"]] = host_info
+
+    # Obtener tags de los hosts
+    host_ids = list({info["hostid"] for info in trigger_map.values() if info["hostid"]})
+    host_tags_map = {}
+
+    if host_ids:
+        for i in range(0, len(host_ids), 500):
+            batch = host_ids[i:i + 500]
+            hosts = zabbix_request("host.get", {
+                "hostids": batch,
+                "output": ["hostid"],
+                "selectTags": "extend",
+            })
+            if hosts:
+                for h in hosts:
+                    responsible_value = None
+                    for t in h.get("tags", []):
+                        if t["tag"] == "responsable":
+                            responsible_value = t["value"]
+                            break
+                    host_tags_map[h["hostid"]] = responsible_value
+
+    # Filtrar problemas por responsable
+    filtered_problems = []
+    for p in problems:
+        t_info = trigger_map.get(p["objectid"])
+        if not t_info:
+            continue
+        host_resp = host_tags_map.get(t_info["hostid"])
+        if host_resp == responsible:
+            filtered_problems.append({
+                "problem": p,
+                "host": t_info["host_name"],
+                "groups": t_info["groups"],
+            })
+
+    return filtered_problems
+
+
+def list_responsibles():
+    """Lista todos los responsables (tag 'responsable') que existen en hosts."""
+    hosts = zabbix_request("host.get", {
+        "output": ["hostid", "name"],
+        "selectTags": "extend",
+    })
+
+    responsibles = {}
+    for h in (hosts or []):
+        for t in h.get("tags", []):
+            if t["tag"] == "responsable":
+                resp = t["value"]
+                if resp not in responsibles:
+                    responsibles[resp] = []
+                responsibles[resp].append(h["name"])
+
+    return responsibles
+
+
+def print_report_by_responsible():
+    """Genera reporte filtrado por responsable. Pide el responsable al usuario."""
+    print("\nConsultando responsables disponibles...")
+    responsibles = list_responsibles()
+
+    if not responsibles:
+        print("No hay hosts con tag 'responsable'.")
+        return
+
+    print()
+    print("Responsables disponibles:")
+    print("-" * 70)
+    resp_list = sorted(responsibles.keys())
+    for i, resp in enumerate(resp_list, 1):
+        count = len(responsibles[resp])
+        print(f"  {i}. {resp}  ({count} host(s))")
+    print()
+
+    try:
+        choice = input("Seleccione numero (o 'b' para volver): ").strip()
+        if choice.lower() == "b" or not choice:
+            return
+        selected = resp_list[int(choice) - 1]
+    except (ValueError, IndexError):
+        print("Seleccion invalida.")
+        return
+
+    problems = get_report_by_responsible(selected)
+
+    print()
+    print("=" * 70)
+    print(f"REPORTE PARA RESPONSABLE: {selected}")
+    print(f"Hosts asignados: {len(responsibles[selected])}")
+    print(f"Problemas activos en sus hosts: {len(problems) if problems else 0}")
+    print("=" * 70)
+
+    if not problems:
+        print("\n  No hay problemas activos en sus hosts. Operacion estable.")
+        print("=" * 70)
+        return
+
+    # Agrupar por host
+    by_host = defaultdict(list)
+    for p in problems:
+        by_host[p["host"]].append(p)
+
+    sev_names = {0: "Info", 1: "Info", 2: "Warning", 3: "Average", 4: "High", 5: "Disaster"}
+
+    for host, items in sorted(by_host.items()):
+        print(f"\n  {host} — {len(items)} problema(s)")
+        print("  " + "-" * 66)
+        for item in items:
+            p = item["problem"]
+            sev = sev_names.get(int(p["severity"]), "?")
+            ack = "" if p["acknowledged"] == "1" else " [sin reconocer]"
+            print(f"    [{sev:<8}] {p['name']}{ack}")
+
+    print()
+    print("=" * 70)
+
+
+def get_monitoring_quality_report():
+    """
+    Reporte de calidad del monitoreo para administrador Zabbix.
+    Detecta: items no soportados, sin datos, hosts sin tags, triggers ruidosos.
+    """
+    from datetime import timedelta
+    now = datetime.now()
+    time_24h = int((now - timedelta(hours=24)).timestamp())
+
+    # 1. Items no soportados (state=1)
+    unsupported = zabbix_request("item.get", {
+        "filter": {"state": "1", "status": "0"},
+        "output": ["itemid", "name", "key_", "error", "hostid"],
+        "selectHosts": ["name"],
+        "limit": 200,
+    }) or []
+
+    # 2. Hosts sin tags
+    all_hosts = zabbix_request("host.get", {
+        "output": ["hostid", "name"],
+        "selectTags": "extend",
+        "filter": {"status": "0"},
+    }) or []
+
+    hosts_no_tags = [h for h in all_hosts if not h.get("tags")]
+    hosts_missing_responsable = [
+        h for h in all_hosts
+        if not any(t["tag"] == "responsable" for t in h.get("tags", []))
+    ]
+
+    # 3. Triggers ruidosos (que cambiaron de estado muchas veces en 24h)
+    noisy_events = zabbix_request("event.get", {
+        "output": ["objectid", "name"],
+        "time_from": time_24h,
+        "source": 0,
+        "object": 0,
+        "value": 1,
+    }) or []
+
+    from collections import Counter
+    trigger_counts = Counter(e["objectid"] for e in noisy_events)
+    noisy_triggers_ids = [tid for tid, count in trigger_counts.items() if count >= 3]
+
+    noisy_triggers_info = []
+    if noisy_triggers_ids:
+        for i in range(0, len(noisy_triggers_ids), 500):
+            batch = noisy_triggers_ids[i:i+500]
+            trigs = zabbix_request("trigger.get", {
+                "triggerids": batch,
+                "output": ["triggerid", "description"],
+                "selectHosts": ["name"],
+            }) or []
+            for t in trigs:
+                host = t["hosts"][0]["name"] if t.get("hosts") else "?"
+                noisy_triggers_info.append({
+                    "name": t["description"],
+                    "host": host,
+                    "count": trigger_counts[t["triggerid"]],
+                })
+
+    noisy_triggers_info.sort(key=lambda x: x["count"], reverse=True)
+
+    # 4. Hosts deshabilitados
+    disabled_hosts = zabbix_request("host.get", {
+        "output": ["hostid", "name"],
+        "filter": {"status": "1"},
+    }) or []
+
+    return {
+        "timestamp": now.strftime("%Y-%m-%d %H:%M"),
+        "total_hosts": len(all_hosts),
+        "unsupported_items": unsupported,
+        "hosts_no_tags": hosts_no_tags,
+        "hosts_no_responsable": hosts_missing_responsable,
+        "noisy_triggers": noisy_triggers_info,
+        "disabled_hosts": disabled_hosts,
+    }
+
+
+def print_monitoring_quality_report():
+    """Reporte de calidad del monitoreo para admin Zabbix."""
+    print("\nAnalizando calidad del monitoreo...")
+    data = get_monitoring_quality_report()
+
+    print()
+    print("=" * 70)
+    print(f"CALIDAD DEL MONITOREO — {data['timestamp']}")
+    print(f"Total hosts habilitados: {data['total_hosts']}")
+    print("=" * 70)
+
+    # Items no soportados
+    unsup = data["unsupported_items"]
+    print(f"\nITEMS NO SOPORTADOS: {len(unsup)}")
+    print("-" * 70)
+    if unsup:
+        # Agrupar por host
+        by_host = defaultdict(list)
+        for item in unsup:
+            host_name = item["hosts"][0]["name"] if item.get("hosts") else "?"
+            by_host[host_name].append(item)
+        for host, items in sorted(by_host.items(), key=lambda x: -len(x[1])):
+            print(f"  {host}: {len(items)} item(s)")
+            for it in items[:3]:
+                error = (it.get("error", "")[:60] + "...") if len(it.get("error", "")) > 60 else it.get("error", "sin detalle")
+                print(f"    - {it['name']}")
+                print(f"      error: {error}")
+            if len(items) > 3:
+                print(f"    ... y {len(items) - 3} mas")
+    else:
+        print("  Ninguno.")
+
+    # Hosts sin tags / sin responsable
+    print(f"\nHOSTS SIN TAGS: {len(data['hosts_no_tags'])}")
+    print("-" * 70)
+    if data["hosts_no_tags"]:
+        for h in data["hosts_no_tags"]:
+            print(f"  - {h['name']}")
+    else:
+        print("  Todos los hosts tienen tags.")
+
+    print(f"\nHOSTS SIN TAG 'responsable': {len(data['hosts_no_responsable'])}")
+    print("-" * 70)
+    if data["hosts_no_responsable"]:
+        for h in data["hosts_no_responsable"]:
+            print(f"  - {h['name']}")
+    else:
+        print("  Todos los hosts tienen responsable asignado.")
+
+    # Triggers ruidosos
+    noisy = data["noisy_triggers"]
+    print(f"\nTRIGGERS RUIDOSOS (3+ veces en 24h): {len(noisy)}")
+    print("-" * 70)
+    if noisy:
+        for t in noisy[:10]:
+            print(f"  {t['count']:>3}x  {t['host']}  -> {t['name']}")
+        if len(noisy) > 10:
+            print(f"  ... y {len(noisy) - 10} mas")
+    else:
+        print("  Ninguno detectado en ultimas 24h.")
+
+    # Hosts deshabilitados
+    disabled = data["disabled_hosts"]
+    print(f"\nHOSTS DESHABILITADOS: {len(disabled)}")
+    print("-" * 70)
+    if disabled:
+        for h in disabled:
+            print(f"  - {h['name']}")
+    else:
+        print("  Ninguno.")
+
+    # Recomendaciones
+    print()
+    print("RECOMENDACIONES PARA ADMIN ZABBIX")
+    print("-" * 70)
+    if unsup:
+        print(f"  -> Revisar {len(unsup)} item(s) no soportados. Verificar keys, OIDs, credenciales.")
+    if data["hosts_no_responsable"]:
+        print(f"  -> Asignar tag 'responsable' a {len(data['hosts_no_responsable'])} host(s) para habilitar reporte por dominio.")
+    if noisy:
+        top_noisy = noisy[0]
+        print(f"  -> Trigger mas ruidoso: '{top_noisy['name']}' en {top_noisy['host']} ({top_noisy['count']}x). Considerar ajustar umbral o agregar dependencia.")
+    if not unsup and not data["hosts_no_responsable"] and not noisy:
+        print("  -> Calidad del monitoreo: OK. Sin acciones pendientes.")
+    print("=" * 70)
