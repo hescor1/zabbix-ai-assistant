@@ -382,7 +382,7 @@ def get_mttr_and_aging():
 
     # Obtener eventos PROBLEM (value=1) de ultimos 7 dias
     problem_events = zabbix_request("event.get", {
-        "output": ["eventid", "clock", "name", "severity", "r_eventid"],
+        "output": ["eventid", "clock", "name", "severity", "r_eventid", "acknowledged"],
         "time_from": time_7d,
         "source": 0,
         "object": 0,
@@ -416,11 +416,16 @@ def get_mttr_and_aging():
                 "clock": p_clock,
                 "r_clock": r_clock,
                 "duration": r_clock - p_clock,
+                "acked": p.get("acknowledged", "0") == "1",
             })
 
     # Separar 24h y 7d
     resolved_24h = [r for r in resolved if r["clock"] >= time_24h]
     resolved_7d = resolved
+
+    # Separar resueltos por equipo vs auto-recuperados
+    resolved_by_team_24h = [r for r in resolved_24h if r.get("acked", False)]
+    auto_recovered_24h = [r for r in resolved_24h if not r.get("acked", False)]
 
     # MTTR 24h
     mttr_24h = None
@@ -471,6 +476,8 @@ def get_mttr_and_aging():
         "mttr_24h": mttr_24h,
         "mttr_7d": mttr_7d,
         "resolved_24h": resolved_24h_count,
+        "resolved_by_team_24h": len(resolved_by_team_24h),
+        "auto_recovered_24h": len(auto_recovered_24h),
         "resolved_7d": resolved_7d_count,
         "active_count": len(active) if active else 0,
         "aging": aging_buckets,
@@ -576,21 +583,33 @@ def get_executive_summary():
     report = get_golden_signals_report()
     mttr_data = get_mttr_and_aging()
 
-    # Contar problemas High/Disaster
+    # Contar problemas High y Disaster por separado
     high_count = 0
+    disaster_count = 0
     if report.get("signals"):
         for signal_data in report["signals"].values():
             for p in signal_data["patterns"]:
-                if p["severity_max"] >= 4:
+                if p["severity_max"] == 4:
                     high_count += p["problem_count"]
+                elif p["severity_max"] == 5:
+                    disaster_count += p["problem_count"]
 
     # Problemas criticos sin atender > 7 dias
     critical_aging = mttr_data["aging"].get("> 7d", 0)
 
+    # Contar solo accionables (severity >= 2, Warning+)
+    actionable = 0
+    if report.get("signals"):
+        for signal_data in report["signals"].values():
+            for p in signal_data["patterns"]:
+                if p["severity_max"] >= 2:
+                    actionable += p["problem_count"]
     return {
         "timestamp": report.get("timestamp", ""),
-        "total_active": report.get("total", 0),
-        "high_disaster": high_count,
+        "total_active": actionable,
+        "high_disaster": high_count + disaster_count,
+        "high_count": high_count,
+        "disaster_count": disaster_count,
         "mttr_24h": mttr_data["mttr_24h"],
         "mttr_7d": mttr_data["mttr_7d"],
         "critical_aging": critical_aging,
@@ -613,7 +632,8 @@ def print_executive_summary():
     print(f"  Severidad alta/critica:      {data['high_disaster']}")
     print(f"  Sin atender mas de 7 dias:   {data['critical_aging']}")
     print(f"  MTTR ultimas 24h:            {format_duration(data['mttr_24h'])}")
-    print(f"  Problemas resueltos hoy:     {data['resolved_24h']}")
+    print(f"  Resueltos por equipo:        {data.get('resolved_by_team_24h', 0)}")
+    print(f"  Auto-recuperados:            {data.get('auto_recovered_24h', 0)}")
     print()
 
     # Conclusion automatica
